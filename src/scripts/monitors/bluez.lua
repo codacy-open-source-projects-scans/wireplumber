@@ -279,6 +279,11 @@ function createNode(parent, id, type, factory, properties)
     properties["node.autoconnect"] = true
   end
 
+  -- hide the sco-source node because we use the loopback source instead
+  if factory == "api.bluez5.sco.source" then
+    properties["api.bluez5.internal"] = true
+  end
+
   -- apply properties from bluetooth.conf
   cutils.evaluateRulesApplyProperties (properties, "monitor.bluez.rules")
 
@@ -394,8 +399,8 @@ function CreateDeviceLoopbackSource (dev_name, dec_desc, dev_id)
       ["bluez5.loopback"] = true,
       ["stream.dont-remix"] = true,
       ["node.passive"] = true,
-      ["target.dont-fallback"] = true,
-      ["target.linger"] = true
+      ["node.dont-fallback"] = true,
+      ["node.linger"] = true
     },
     ["playback.props"] = Json.Object {
       ["node.name"] = string.format ("bluez_source.%s", dev_name),
@@ -410,7 +415,7 @@ function CreateDeviceLoopbackSource (dev_name, dec_desc, dev_id)
       ["bluez5.loopback"] = true,
       ["filter.smart"] = true,
       ["filter.smart.target"] = Json.Object {
-        ["media.class"] = "Audio/Source",
+        ["factory.name"] = "api.bluez5.sco.source",
         ["device.api"] = "bluez5",
         ["bluez5.loopback"] = false,
         ["device.id"] = dev_id
