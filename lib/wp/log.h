@@ -14,7 +14,21 @@
 
 G_BEGIN_DECLS
 
-#define WP_LOG_LEVEL_TRACE (1 << G_LOG_LEVEL_USER_SHIFT)
+/*!
+ * \brief A custom GLib log level for trace messages (extension of GLogLevelFlags)
+ * \ingroup wplog
+ */
+static const guint WP_LOG_LEVEL_TRACE = (1 << 8);
+
+/*
+  The above WP_LOG_LEVEL_TRACE constant is intended to be defined as
+  (1 << G_LOG_LEVEL_USER_SHIFT), but due to a gobject-introspection bug
+  we define it with the value of G_LOG_LEVEL_USER_SHIFT, which is 8, so
+  that it ends up correctly in the bindings. To avoid value mismatches,
+  we statically verify here that G_LOG_LEVEL_USER_SHIFT is indeed 8.
+  See https://gitlab.freedesktop.org/pipewire/wireplumber/-/issues/540
+*/
+G_STATIC_ASSERT (G_LOG_LEVEL_USER_SHIFT == 8);
 
 #define WP_OBJECT_FORMAT "<%s:%p>"
 #define WP_OBJECT_ARGS(object) \
@@ -47,22 +61,24 @@ struct _WpLogTopic {
 #define WP_LOG_TOPIC_EXTERN(var) \
   extern WpLogTopic * var;
 
-#define WP_LOG_TOPIC(var, t) \
-  WpLogTopic var##_struct = { .topic_name = t, .flags = WP_LOG_TOPIC_FLAG_STATIC };  \
+#define WP_LOG_TOPIC(var, name) \
+  WpLogTopic var##_struct = { .topic_name = name, .flags = WP_LOG_TOPIC_FLAG_STATIC };  \
   WpLogTopic * var = &(var##_struct);
 
-#define WP_LOG_TOPIC_STATIC(var, t) \
-  static WpLogTopic var##_struct = { .topic_name = t, .flags = WP_LOG_TOPIC_FLAG_STATIC }; \
+#define WP_LOG_TOPIC_STATIC(var, name) \
+  static WpLogTopic var##_struct = { .topic_name = name, .flags = WP_LOG_TOPIC_FLAG_STATIC }; \
   static G_GNUC_UNUSED WpLogTopic * var = &(var##_struct);
 
-#define WP_DEFINE_LOCAL_LOG_TOPIC(t) \
-  WP_LOG_TOPIC_STATIC(WP_LOCAL_LOG_TOPIC, t)
+#define WP_DEFINE_LOCAL_LOG_TOPIC(name) \
+  WP_LOG_TOPIC_STATIC(WP_LOCAL_LOG_TOPIC, name)
 
 /* make glib log functions also use the local log topic */
-#ifdef G_LOG_DOMAIN
-# undef G_LOG_DOMAIN
+#ifdef WP_USE_LOCAL_LOG_TOPIC_IN_G_LOG
+# ifdef G_LOG_DOMAIN
+#  undef G_LOG_DOMAIN
+# endif
+# define G_LOG_DOMAIN (WP_LOCAL_LOG_TOPIC->topic_name)
 #endif
-#define G_LOG_DOMAIN (WP_LOCAL_LOG_TOPIC->topic_name)
 
 WP_API
 void wp_log_topic_init (WpLogTopic *topic);
