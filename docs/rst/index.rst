@@ -28,6 +28,7 @@ Table of Contents
 
    policies/linking.rst
    policies/smart_filters.rst
+   policies/software_dsp.rst
 
 .. toctree::
    :maxdepth: 2
