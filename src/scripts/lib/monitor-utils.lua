@@ -83,7 +83,7 @@ end
 
 function mutils.clear_cam_data (self, dev_num)
   local dev_cam_data = self.cam_data[dev_num]
-  if not dev_num then
+  if not dev_cam_data then
     return
   end
 
@@ -161,7 +161,7 @@ function mutils.register_cam_node (self, parent, id, factory, properties)
     cam_data.dev_path = properties["api.v4l2.path"]
   end
 
-  cam_api_data = cam_data[api]
+  local cam_api_data = cam_data[api]
   cam_api_data.enum_status = true
 
   -- cache info, it comes handy when creating node
