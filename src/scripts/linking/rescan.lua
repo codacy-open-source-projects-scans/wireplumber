@@ -15,6 +15,8 @@ cutils = require ("common-utils")
 futils = require ("filter-utils")
 log = Log.open_topic ("s-linking")
 handles = {}
+handles.rescan_enabled = true
+handles.timeout_source = nil
 
 function checkFilter (si, om, handle_nonstreams)
   -- always handle filters if handle_nonstreams is true, even if it is disabled
@@ -42,11 +44,6 @@ end
 
 function checkLinkable (si, om, handle_nonstreams)
   local si_props = si.properties
-
-  -- Always handle si-audio-virtual session items
-  if si_props ["item.factory.name"] == "si-audio-virtual" then
-    return true, si_props
-  end
 
   -- For the rest of them, only handle stream session items
   if not si_props or (si_props ["item.node.type"] ~= "stream"
@@ -85,6 +82,10 @@ function unhandleLinkable (si, om)
         in_flags.peer_id = nil
       elseif in_id == si_id and out_flags.peer_id == in_id then
         out_flags.peer_id = nil
+      end
+
+      if cutils.parseBool (silink.properties["is.role.policy.link"]) then
+        lutils.clearPriorityMediaRoleLink(silink)
       end
 
       silink:remove ()
@@ -186,24 +187,72 @@ SimpleEventHook {
       Constraint { "event.subject.key", "c", "default.audio.source",
           "default.audio.sink", "default.video.source" },
     },
-  },
-  execute = function (event)
-    local source = event:get_source ()
-    source:call ("schedule-rescan", "linking")
-  end
-}:register ()
-
-SimpleEventHook {
-  name = "linking/rescan-trigger-on-filters-metadata-changed",
-  interests = {
+    -- on any "filters" metadata changed
     EventInterest {
       Constraint { "event.type", "=", "metadata-changed" },
       Constraint { "metadata.name", "=", "filters" },
     },
   },
   execute = function (event)
+    if handles.rescan_enabled then
+      local source = event:get_source ()
+      source:call ("schedule-rescan", "linking")
+    end
+  end
+}:register ()
+
+SimpleEventHook {
+  name = "linking/session-item-added",
+  before = "linking/rescan-trigger",
+  interests = {
+    EventInterest {
+      Constraint { "event.type", "=", "session-item-added" },
+    },
+  },
+  execute = function (event)
+    -- clear timeout source, if any
+    if handles.timeout_source ~= nil then
+      handles.timeout_source:destroy ()
+      handles.timeout_source = nil
+    end
+
+    -- Always enable rescan when any node is added
+    handles.rescan_enabled = true
+  end
+}:register ()
+
+-- Stop rescan for 2 seconds if BT item was removed. This avoids audio
+-- being played on internal nodes for a few seconds while the BT device is
+-- switching profiles.
+SimpleEventHook {
+  name = "linking/bluez-session-item-removed",
+  before = "linking/rescan-trigger",
+  interests = {
+    EventInterest {
+      Constraint { "event.type", "=", "session-item-removed" },
+      Constraint { "device.api", "=", "bluez5" },
+    },
+  },
+  execute = function (event)
+    local si = event:get_subject ()
+    local si_props = si.properties
     local source = event:get_source ()
-    source:call ("schedule-rescan", "linking")
+
+    -- clear timeout source, if any
+    if handles.timeout_source ~= nil then
+      handles.timeout_source:destroy ()
+      handles.timeout_source = nil
+    end
+
+    -- disable rescan
+    handles.rescan_enabled = false
+
+    -- re-enable rescan after 2 seconds
+    handles.timeout_source = Core.timeout_add (2000, function()
+      handles.timeout_source = nil
+      handles.rescan_enabled = true
+      source:call ("schedule-rescan", "linking")
+    end)
   end
 }:register ()
 
