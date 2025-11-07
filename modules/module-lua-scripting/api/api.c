@@ -293,6 +293,15 @@ core_test_feature (lua_State *L)
   return 1;
 }
 
+static int
+core_update_properties (lua_State *L)
+{
+  WpCore *core = get_wp_core(L);
+  luaL_checktype (L, 1, LUA_TTABLE);
+  wp_core_update_properties (core, wplua_table_to_properties (L, 1));
+  return 0;
+}
+
 static const luaL_Reg core_funcs[] = {
   { "get_properties", core_get_properties },
   { "get_info", core_get_info },
@@ -304,6 +313,7 @@ static const luaL_Reg core_funcs[] = {
   { "quit", core_quit },
   { "require_api", core_require_api },
   { "test_feature", core_test_feature },
+  { "update_properties", core_update_properties },
   { NULL, NULL }
 };
 
@@ -324,7 +334,7 @@ static WpLuaLogTopic *
 wp_lua_log_topic_copy (WpLuaLogTopic *topic)
 {
   WpLuaLogTopic *copy = g_new0 (WpLuaLogTopic, 1);
-  copy->topic_name = g_ref_string_acquire ((char *) copy->topic_name);
+  copy->topic_name = g_ref_string_acquire ((char *) topic->topic_name);
   wp_log_topic_register (copy);
   return copy;
 }
@@ -588,6 +598,28 @@ push_wpiterator (lua_State *L, WpIterator *it)
   wplua_pushboxed (L, WP_TYPE_ITERATOR, it);
   return 2;
 }
+
+static int
+iterator_reset (lua_State *L)
+{
+  WpIterator *it = wplua_checkboxed (L, 1, WP_TYPE_ITERATOR);
+  wp_iterator_reset (it);
+  return 0;
+}
+
+static int
+iterator_iterate (lua_State *L)
+{
+  WpIterator *it = wplua_checkboxed (L, 1, WP_TYPE_ITERATOR);
+  return push_wpiterator (L, wp_iterator_ref (it));
+}
+
+static const luaL_Reg iterator_funcs[] = {
+  { "next", iterator_next },
+  { "reset", iterator_reset },
+  { "iterate", iterator_iterate },
+  { NULL, NULL }
+};
 
 /* Settings WpIterator */
 
@@ -1070,10 +1102,20 @@ spa_device_store_managed_object (lua_State *L)
   return 0;
 }
 
+static int
+spa_device_set_managed_pending (lua_State *L)
+{
+  WpSpaDevice *device = wplua_checkobject (L, 1, WP_TYPE_SPA_DEVICE);
+  guint id = luaL_checkinteger (L, 2);
+  wp_spa_device_set_managed_pending (device, id);
+  return 0;
+}
+
 static const luaL_Reg spa_device_methods[] = {
   { "iterate_managed_objects", spa_device_iterate_managed_objects },
   { "get_managed_object", spa_device_get_managed_object },
   { "store_managed_object", spa_device_store_managed_object },
+  { "set_managed_pending", spa_device_set_managed_pending },
   { NULL, NULL }
 };
 
@@ -1502,6 +1544,45 @@ static const luaL_Reg si_adapter_methods[] = {
 
 /* WpPipewireObject */
 
+static void
+on_enum_params_done (WpPipewireObject * pwobj, GAsyncResult * res,
+    GClosure * closure)
+{
+  g_autoptr (GError) error = NULL;
+  GValue vals[2] = { G_VALUE_INIT, G_VALUE_INIT };
+  int n_vals = 1;
+  WpIterator *it;
+
+  it = wp_pipewire_object_enum_params_finish (pwobj, res, &error);
+  g_value_init (&vals[0], WP_TYPE_ITERATOR);
+  g_value_set_boxed (&vals[0], it);
+  if (!it) {
+    g_value_init (&vals[1], G_TYPE_STRING);
+    g_value_set_string (&vals[1], error->message);
+    n_vals = 2;
+  }
+
+  g_clear_pointer (&it, wp_iterator_unref);
+  g_closure_invoke (closure, NULL, n_vals, vals, NULL);
+
+  g_value_unset (&vals[0]);
+  g_value_unset (&vals[1]);
+  g_closure_invalidate (closure);
+  g_closure_unref (closure);
+}
+
+static int
+pipewire_object_enum_params (lua_State *L)
+{
+  WpPipewireObject *pwobj = wplua_checkobject (L, 1, WP_TYPE_PIPEWIRE_OBJECT);
+  const gchar *id = luaL_checkstring (L, 2);
+  GClosure * closure = wplua_checkclosure (L, 3);
+  g_closure_sink (g_closure_ref (closure));
+  wp_pipewire_object_enum_params (pwobj, id, NULL, NULL,
+      (GAsyncReadyCallback) on_enum_params_done, closure);
+  return 0;
+}
+
 static int
 pipewire_object_iterate_params (lua_State *L)
 {
@@ -1522,6 +1603,7 @@ pipewire_object_set_param (lua_State *L)
 }
 
 static const luaL_Reg pipewire_object_methods[] = {
+  { "enum_params", pipewire_object_enum_params },
   { "iterate_params", pipewire_object_iterate_params },
   { "set_param" , pipewire_object_set_param },
   { "set_params" , pipewire_object_set_param }, /* deprecated, compat only */
@@ -1883,6 +1965,77 @@ json_utils_match_rules_update_properties (lua_State *L)
 static const luaL_Reg json_utils_funcs[] = {
   { "match_rules", json_utils_match_rules },
   { "match_rules_update_properties", json_utils_match_rules_update_properties },
+  { NULL, NULL }
+};
+
+/* ProcInfo */
+
+static int
+proc_info_get_pid (lua_State *L)
+{
+  WpProcInfo *pi = wplua_checkboxed (L, 1, WP_TYPE_PROC_INFO);
+  lua_pushinteger (L, wp_proc_info_get_pid (pi));
+  return 1;
+}
+
+static int
+proc_info_get_parent_pid (lua_State *L)
+{
+  WpProcInfo *pi = wplua_checkboxed (L, 1, WP_TYPE_PROC_INFO);
+  lua_pushinteger (L, wp_proc_info_get_parent_pid (pi));
+  return 1;
+}
+
+static int
+proc_info_get_n_args (lua_State *L)
+{
+  WpProcInfo *pi = wplua_checkboxed (L, 1, WP_TYPE_PROC_INFO);
+  lua_pushinteger (L, wp_proc_info_get_n_args (pi));
+  return 1;
+}
+
+static int
+proc_info_get_arg (lua_State *L)
+{
+  WpProcInfo *pi = wplua_checkboxed (L, 1, WP_TYPE_PROC_INFO);
+  guint index = luaL_checkinteger (L, 2);
+  lua_pushstring (L, wp_proc_info_get_arg (pi, index));
+  return 1;
+}
+
+static int
+proc_info_get_cgroup (lua_State *L)
+{
+  WpProcInfo *pi = wplua_checkboxed (L, 1, WP_TYPE_PROC_INFO);
+  lua_pushstring (L, wp_proc_info_get_cgroup (pi));
+  return 1;
+}
+
+static const luaL_Reg proc_info_funcs[] = {
+  { "get_pid", proc_info_get_pid },
+  { "get_parent_pid", proc_info_get_parent_pid },
+  { "get_cgroup", proc_info_get_cgroup },
+  { "get_n_args", proc_info_get_n_args },
+  { "get_arg", proc_info_get_arg },
+  { NULL, NULL }
+};
+
+/* ProcUtils */
+
+static int
+proc_utils_get_proc_info (lua_State *L)
+{
+  guint pid = luaL_checkinteger (L, 1);
+  WpProcInfo *pi = wp_proc_utils_get_proc_info (pid);
+  if (pi)
+    wplua_pushboxed (L, WP_TYPE_PROC_INFO, pi);
+  else
+    lua_pushnil (L);
+  return 1;
+}
+
+static const luaL_Reg proc_utils_funcs[] = {
+  { "get_proc_info", proc_utils_get_proc_info },
   { NULL, NULL }
 };
 
@@ -2792,6 +2945,9 @@ wp_lua_scripting_api_init (lua_State *L)
   luaL_newlib (L, json_utils_funcs);
   lua_setglobal (L, "JsonUtils");
 
+  luaL_newlib (L, proc_utils_funcs);
+  lua_setglobal (L, "ProcUtils");
+
   luaL_newlib (L, settings_methods);
   lua_setglobal (L, "WpSettings");
 
@@ -2853,6 +3009,10 @@ wp_lua_scripting_api_init (lua_State *L)
       NULL, transition_methods);
   wplua_register_type_methods (L, WP_TYPE_CONF,
       conf_new, conf_methods);
+  wplua_register_type_methods (L, WP_TYPE_PROC_INFO,
+      NULL, proc_info_funcs);
+  wplua_register_type_methods (L, WP_TYPE_ITERATOR,
+      NULL, iterator_funcs);
 
   if (!wplua_load_uri (L, URI_API, &error) ||
       !wplua_pcall (L, 0, 0, &error)) {

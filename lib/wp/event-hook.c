@@ -239,9 +239,9 @@ wp_event_hook_runs_for_event (WpEventHook * self, WpEvent * event)
  * \param self the event hook
  * \param event the event that triggered the hook
  * \param cancellable (nullable): a GCancellable to cancel the async operation
- * \param callback (scope async): a callback to fire after execution of the hook
+ * \param callback (scope async)(closure callback_data): a callback to fire after execution of the hook
  *    has completed
- * \param callback_data (closure): data for the callback
+ * \param callback_data data for the callback
  */
 void
 wp_event_hook_run (WpEventHook * self,
@@ -321,32 +321,15 @@ wp_interest_event_hook_runs_for_event (WpEventHook * hook, WpEvent * event)
       wp_interest_event_hook_get_instance_private (self);
   g_autoptr (WpProperties) properties = wp_event_get_properties (event);
   g_autoptr (GObject) subject = wp_event_get_subject (event);
-  GType gtype = subject ? G_OBJECT_TYPE (subject) : WP_TYPE_EVENT;
   guint i;
   WpObjectInterest *interest = NULL;
-  WpInterestMatch match;
-
-  const unsigned int MATCH_ALL_PROPS = (WP_INTEREST_MATCH_PW_GLOBAL_PROPERTIES |
-                               WP_INTEREST_MATCH_PW_PROPERTIES |
-                               WP_INTEREST_MATCH_G_PROPERTIES);
 
   for (i = 0; i < priv->interests->len; i++) {
     interest = g_ptr_array_index (priv->interests, i);
-    match = wp_object_interest_matches_full (interest,
-        WP_INTEREST_MATCH_FLAGS_CHECK_ALL,
-        gtype, subject, properties, properties);
-
-    /* the interest may have a GType that matches the GType of the subject
-       or it may have WP_TYPE_EVENT as its GType, in which case it will
-       match any type of subject */
-    if (match == WP_INTEREST_MATCH_ALL)
-      return TRUE;
-    else if (subject && (match & MATCH_ALL_PROPS) == MATCH_ALL_PROPS) {
-      match = wp_object_interest_matches_full (interest, 0,
-          WP_TYPE_EVENT, NULL, NULL, NULL);
-      if (match & WP_INTEREST_MATCH_GTYPE)
+    if (wp_object_interest_matches_full (interest,
+            WP_INTEREST_MATCH_FLAGS_NONE,
+            WP_TYPE_EVENT, subject, properties, properties) == WP_INTEREST_MATCH_ALL)
         return TRUE;
-    }
   }
   return FALSE;
 }
