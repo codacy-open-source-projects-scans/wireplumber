@@ -36,7 +36,7 @@ find_stored_routes_hook = SimpleEventHook {
     local event_properties = event:get_properties ()
     local profile_name = event_properties ["profile.name"]
     local active_ids = event_properties ["profile.active-device-ids"]
-    local selected_routes = event:get_data ("selected-routes") or {}
+    local selected_routes = event:get_data ("selected-routes") or Properties()
 
     local dev_info = devinfo:get_device_info (device)
     assert (dev_info)
@@ -108,13 +108,13 @@ apply_route_props_hook = SimpleEventHook {
   },
   execute = function (event)
     local device = event:get_subject ()
-    local selected_routes = event:get_data ("selected-routes") or {}
+    local selected_routes = event:get_data ("selected-routes") or Properties()
     local new_selected_routes = {}
 
     local dev_info = devinfo:get_device_info (device)
     assert (dev_info)
 
-    if next (selected_routes) == nil then
+    if selected_routes:get_count () == 0 then
       log:info (device, "No routes selected to set on " .. dev_info.name)
       return
     end

@@ -103,14 +103,15 @@ static void
 bind_call (GObject * obj, GAsyncResult * res, gpointer data)
 {
   WpModemManager *wpmm = WP_MODEM_MANAGER (data);
-  GError *err = NULL;
+  g_autoptr (GError) err = NULL;
   GDBusProxy *call;
-  GVariant *prop;
+  g_autoptr (GVariant) prop = NULL;
   gint init_state;
 
   call = g_dbus_proxy_new_finish (res, &err);
   if (call == NULL) {
-    wp_warning_object (wpmm, "Failed to get call");
+    g_prefix_error (&err, "Failed to get call: ");
+    wp_warning_object (wpmm, "%s", err->message);
     return;
   }
 
@@ -122,8 +123,6 @@ bind_call (GObject * obj, GAsyncResult * res, gpointer data)
 
     if (is_active_state (init_state))
       active_calls_inc (wpmm);
-
-    g_variant_unref (prop);
   }
 
   wpmm->calls = g_list_prepend (wpmm->calls, call);
@@ -165,7 +164,7 @@ on_voice_signal (GDBusProxy * iface,
   g_object_get (wpmm->dbus, "connection", &conn, NULL);
 
   if (!g_strcmp0 (signal, "CallAdded")) {
-    g_variant_get (params, "(o)", &path);
+    g_variant_get (params, "(&o)", &path);
     g_dbus_proxy_new (conn,
                       G_DBUS_PROXY_FLAGS_NONE,
                       NULL,
@@ -175,9 +174,8 @@ on_voice_signal (GDBusProxy * iface,
                       NULL,
                       bind_call,
                       wpmm);
-    g_free (path);
   } else if (!g_strcmp0 (signal, "CallDeleted")) {
-    g_variant_get (params, "(o)", &path);
+    g_variant_get (params, "(&o)", &path);
 
     // The user shouldn't have hundreds of calls, so just linear search.
     deleted = g_list_find_custom (wpmm->calls, path, match_call_path);
@@ -185,8 +183,6 @@ on_voice_signal (GDBusProxy * iface,
       g_object_unref (deleted->data);
       wpmm->calls = g_list_delete_link (wpmm->calls, deleted);
     }
-
-    g_free (path);
   }
 }
 
@@ -196,22 +192,23 @@ list_calls_done (GObject * obj,
                  gpointer data)
 {
   WpModemManager *wpmm = WP_MODEM_MANAGER (data);
-  GVariant *params;
-  GVariantIter *calls;
+  g_autoptr (GVariant) params = NULL;
+  g_autoptr (GVariantIter) calls = NULL;
   gchar *path;
-  GError *err = NULL;
+  g_autoptr (GError) err = NULL;
   g_autoptr (GDBusConnection) conn = NULL;
 
   params = g_dbus_proxy_call_finish (G_DBUS_PROXY (obj), res, &err);
   if (params == NULL) {
     g_prefix_error (&err, "Failed to list active calls on startup: ");
     wp_warning_object (wpmm, "%s", err->message);
-    g_clear_object (&err);
     return;
   }
 
+  g_object_get (wpmm->dbus, "connection", &conn, NULL);
+
   g_variant_get (params, "(ao)", &calls);
-  while (g_variant_iter_loop (calls, "o", &path)) {
+  while (g_variant_iter_loop (calls, "&o", &path)) {
     g_dbus_proxy_new (conn,
                       G_DBUS_PROXY_FLAGS_NONE,
                       NULL,
@@ -222,9 +219,6 @@ list_calls_done (GObject * obj,
                       bind_call,
                       wpmm);
   }
-
-  g_variant_iter_free (calls);
-  g_variant_unref (params);
 }
 
 static void
