@@ -98,8 +98,10 @@ static void item_free (gpointer data)
 {
   Item *item = data;
 
-  free(item->desktop_entry);
-  free(item);
+  g_clear_pointer (&item->desktop_entry, g_free);
+  g_clear_pointer (&item->flatpak_app_id, g_free);
+  g_clear_pointer (&item->flatpak_instance_id, g_free);
+  g_free (item);
 }
 
 static Players *players_new (GDBusConnection *conn)
@@ -128,7 +130,7 @@ static void players_unref (Players *players)
     return;
 
   g_mutex_clear (&players->lock);
-  g_clear_object (&players->items);
+  g_clear_pointer (&players->items, g_hash_table_unref);
   g_clear_object (&players->conn);
   g_clear_object (&players->cancellable);
   g_free (players);
@@ -236,7 +238,7 @@ static void item_desktop_entry_cb (GObject *source_object, GAsyncResult* res, gp
   }
 
   g_variant_get (result, "(v)", &value);
-  if (!g_str_equal(g_variant_get_type_string (value), "s")) {
+  if (!g_variant_is_of_type (value, G_VARIANT_TYPE_STRING)) {
     wp_info ("%p: bad value for DesktopEntry for '%s'", update->players, update->bus_name);
     return;
   }
@@ -426,6 +428,8 @@ wp_mpris_plugin_operation_finalize (GObject *object)
   WpMprisPluginOperation *self = WP_MPRIS_PLUGIN_OPERATION (object);
 
   g_clear_object (&self->conn);
+
+  G_OBJECT_CLASS (wp_mpris_plugin_operation_parent_class)->finalize (object);
 }
 
 static void
@@ -529,9 +533,7 @@ wp_mpris_plugin_disable (WpPlugin * plugin)
 static gpointer
 wp_mpris_plugin_get_players (WpMprisPlugin *self)
 {
-  g_auto (GVariantBuilder) b = G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE_ARRAY);
-
-  g_variant_builder_init (&b, G_VARIANT_TYPE ("av"));
+  g_auto (GVariantBuilder) b = G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE ("av"));
 
   if (self->players) {
     g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->players->lock);
