@@ -44,7 +44,9 @@ Audio
 
 .. describe:: node.software-dsp
 
-   Enables software DSP based on pre-configured hardware rules.
+   Enables software DSP based on pre-configured hardware rules, by hiding the
+   hardware node and exposing a separate virtual node in its place. New
+   configurations should use ``hooks.filter.graph`` instead.
 
    See :ref:`policies_software_dsp` for more information.
 
@@ -99,6 +101,24 @@ Video
 Support components
 ------------------
 
+.. describe:: support.client-context
+
+   Starts a secondary ``pw_context``, running on its own thread, which hosts
+   every PipeWire object that WirePlumber implements in its own process: the
+   PipeWire modules loaded as ``pw-module-client`` components or from Lua with
+   ``LocalModule()``, the nodes created with ``LocalNode()`` and the SPA device
+   handles wrapped by ``SpaDevice()``.
+
+   WirePlumber's main loop also dispatches the event dispatcher, whose hooks
+   can run for a long time, and GSource priorities do not preempt: anything
+   sharing that loop makes no progress for as long as a hook runs. In-process
+   media objects (i.e. local nodes and modules) should be given their own loop
+   to be able to receive media commands without delays, or they may lose audio.
+
+   This is enabled by default and there is rarely a reason to disable it. If
+   it is disabled, those objects fall back to WirePlumber's main
+   ``pw_context`` and become subject to the delays described above.
+
 .. describe:: support.dbus
 
    Provides a D-Bus connection to the session bus. This is needed by some other
@@ -131,6 +151,62 @@ Support components
    Integrates with systemd-logind to enable specific functionality only on the
    active seat.
 
+.. describe:: support.modem-manager
+
+   Integrates with ModemManager to track the state of voice calls, so that a
+   "Voice Call" device profile can be selected while a call is in progress.
+
+   :requires: ``support.system-dbus``
+
+.. describe:: support.mpris
+
+   Provides MPRIS media player control. This is what allows WirePlumber to
+   pause media players when the sink they are playing to disappears; see the
+   ``linking.pause-playback`` setting in :ref:`config_settings`.
+
+   :requires: ``support.dbus``
+
+.. describe:: support.session-services
+
+   Announces which session management services this WirePlumber instance
+   actually provides, by setting the ``session.services`` property on its
+   PipeWire client object. This is how other software can tell what a given
+   instance is responsible for, which matters in a
+   :ref:`multi-instance setup <daemon_multi_instance>`.
+
+.. describe:: api.notifications
+
+   Provides an API for sending desktop notifications through
+   ``org.freedesktop.Notifications``. It is used, for instance, to notify the
+   user when devices are auto-muted.
+
+   :requires: ``support.dbus``
+
+.. describe:: metadata.sm-objects
+
+   Creates the ``sm-objects`` metadata, through which clients can ask
+   WirePlumber to load and unload objects — PipeWire modules, session items and
+   so on — at runtime.
+
+Nodes
+-----
+
+.. describe:: node.audio-group
+
+   Groups together the streams of processes that share a common ancestor,
+   placing them behind a single loopback filter so that they can be controlled
+   as one.
+
+.. describe:: hooks.filter.graph
+
+   Enables attaching an internal filter graph to a node, based on the
+   ``node.filter-graph.rules`` configuration section, without exposing extra
+   nodes in the graph. This is the preferred way to apply software DSP to a
+   node; see :ref:`config_filter_graph`.
+
+   The ``filter-graph.conf`` example fragment demonstrates this; see
+   :ref:`config_example_fragments`.
+
 Policies
 --------
 
@@ -140,7 +216,7 @@ Policies
    for enabling devices, linking streams, granting permissions to clients,
    etc, as appropriate for a desktop system.
 
-.. describe:: policy.role-based
+.. describe:: policy.linking.role-based
 
    Enables the role based priority system policy. This system creates virtual sinks
    that group streams based on their ``media.role`` property, and assigns a

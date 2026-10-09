@@ -212,6 +212,7 @@ enum {
   PROP_PW_CONTEXT,
   PROP_PW_CORE,
   PROP_CONF,
+  N_PROPS,
 };
 
 enum {
@@ -221,6 +222,7 @@ enum {
 };
 
 static guint32 signals[NUM_SIGNALS];
+static GParamSpec *properties[N_PROPS] = { NULL, };
 
 G_DEFINE_TYPE (WpCore, wp_core, WP_TYPE_OBJECT)
 
@@ -563,22 +565,14 @@ wp_core_activate_execute_step (WpObject * object,
 
     case STEP_LOAD_COMPONENTS: {
       g_autoptr (WpProperties) props = wp_core_get_properties (self);
+      const gchar *profile = wp_properties_get (props, "wireplumber.profile");
 
-      if (spa_atob (wp_properties_get (props, "wireplumber.export-core"))) {
-        /* do not load any components on the export core */
-        wp_object_update_features (WP_OBJECT (self), WP_CORE_FEATURE_COMPONENTS, 0);
-        return;
-      }
-      else {
-        const gchar *profile = wp_properties_get (props, "wireplumber.profile");
+      wp_info_object (self,
+          "parsing & loading components for profile [%s]...", profile);
 
-        wp_info_object (self,
-            "parsing & loading components for profile [%s]...", profile);
-
-        /* Load components that are defined in the configuration section */
-        wp_core_load_component (self, profile, "profile", NULL, NULL, NULL,
-            (GAsyncReadyCallback) on_components_loaded, transition);
-      }
+      /* Load components that are defined in the configuration section */
+      wp_core_load_component (self, profile, "profile", NULL, NULL, NULL,
+          (GAsyncReadyCallback) on_components_loaded, transition);
       break;
     }
 
@@ -615,28 +609,23 @@ wp_core_class_init (WpCoreClass * klass)
   wpobject_class->activate_execute_step = wp_core_activate_execute_step;
   wpobject_class->deactivate = wp_core_deactivate;
 
-  g_object_class_install_property (object_class, PROP_G_MAIN_CONTEXT,
-      g_param_spec_boxed ("g-main-context", "g-main-context",
-          "A GMainContext to attach to", G_TYPE_MAIN_CONTEXT,
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_G_MAIN_CONTEXT] = g_param_spec_boxed ("g-main-context", "g-main-context",
+      "A GMainContext to attach to", G_TYPE_MAIN_CONTEXT,
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_PROPERTIES,
-      g_param_spec_boxed ("properties", "properties", "Extra properties",
-          WP_TYPE_PROPERTIES,
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PROPERTIES] = g_param_spec_boxed ("properties", "properties", "Extra properties",
+      WP_TYPE_PROPERTIES, G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_PW_CONTEXT,
-      g_param_spec_pointer ("pw-context", "pw-context", "The pipewire context",
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PW_CONTEXT] = g_param_spec_pointer ("pw-context", "pw-context", "The pipewire context",
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_PW_CORE,
-      g_param_spec_pointer ("pw-core", "pw-core", "The pipewire core",
-          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PW_CORE] = g_param_spec_pointer ("pw-core", "pw-core", "The pipewire core",
+      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_CONF,
-      g_param_spec_object ("conf", "conf", "The main configuration file",
-          WP_TYPE_CONF,
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_CONF] = g_param_spec_object ("conf", "conf", "The main configuration file",
+      WP_TYPE_CONF, G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
+
+  g_object_class_install_properties (object_class, N_PROPS, properties);
 
   signals[SIGNAL_CONNECTED] = g_signal_new ("connected",
       G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
@@ -690,34 +679,27 @@ wp_core_clone (WpCore * self)
       NULL);
 }
 
-static gboolean
-find_export_core (gconstpointer a, gconstpointer b)
-{
-  gpointer obj = (gpointer) a;
-  if (WP_IS_CORE ((gpointer) obj)) {
-    g_autoptr (WpProperties) props = wp_core_get_properties (WP_CORE (obj));
-    if (spa_atob (wp_properties_get (props, "wireplumber.export-core")))
-      return TRUE;
-  }
-  return FALSE;
-}
-
 /*!
- * \brief Returns the special WpCore that is used to maintain a secondary
- * connection to PipeWire, for exporting objects
+ * \brief Returns NULL
  *
- * The export core is enabled by loading the built-in "export-core" component.
+ * \deprecated The export core used to be a secondary connection to PipeWire,
+ * sharing the loop of \a self, on which objects implemented in-process were
+ * exported. It has been superseded by the client context, which hosts those
+ * objects in a separate pw_context running on its own thread, so that they are
+ * not affected by anything that blocks WirePlumber's main loop. The client
+ * context is internal and has no WpCore associated with it; objects are placed
+ * in it transparently, so there is no replacement for this method.
  *
  * \ingroup wpcore
  * \param self the core
- * \returns (transfer full): the export WpCore
+ * \returns (transfer full) (nullable): NULL
  */
 WpCore *
 wp_core_get_export_core (WpCore * self)
 {
   g_return_val_if_fail (WP_IS_CORE (self), NULL);
 
-  return wp_core_find_object (self, find_export_core, NULL);
+  return NULL;
 }
 
 /*!

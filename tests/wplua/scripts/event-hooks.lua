@@ -19,6 +19,7 @@ local function check_results()
   assert(tags[inc()] == "async-start")
   assert(tags[inc()] == "async-start-advance")
   assert(tags[inc()] == "async-step2")
+  assert(tags[inc()] == "async-raise")
   assert(tags[inc()] == "simple-last")
 end
 
@@ -50,6 +51,22 @@ AsyncEventHook {
       execute = function (event, transition)
         checkpoint("async-step2")
         transition:advance()
+      end,
+    },
+  },
+}:register()
+
+AsyncEventHook {
+  name = "test-raising-hook",
+  before = "test-last-hook",
+  after = "test-async-hook",
+  interests = common_interests,
+  steps = {
+    start = {
+      next = "none",
+      execute = function (event, transition)
+        checkpoint("async-raise")
+        error("intentional error from test-raising-hook")
       end,
     },
   },

@@ -34,14 +34,6 @@ get_wp_core (lua_State *L)
   return core;
 }
 
-static WpCore *
-get_wp_export_core (lua_State *L)
-{
-  WpCore *core = get_wp_core (L);
-  g_autoptr (WpCore) export_core = wp_core_get_export_core (core);
-  return export_core ? export_core : core;
-}
-
 /* GLib */
 
 static int
@@ -1055,7 +1047,7 @@ device_new (lua_State *L)
     properties = wp_properties_ref (wplua_checkboxed (L, 2,
         WP_TYPE_PROPERTIES));
 
-  WpDevice *d = wp_device_new_from_factory (get_wp_export_core (L),
+  WpDevice *d = wp_device_new_from_factory (get_wp_core (L),
       factory, properties);
   if (d)
     wplua_pushobject (L, d);
@@ -1076,11 +1068,33 @@ spa_device_new (lua_State *L)
     properties = wp_properties_ref (wplua_checkboxed (L, 2,
         WP_TYPE_PROPERTIES));
 
-  WpSpaDevice *d = wp_spa_device_new_from_spa_factory (get_wp_export_core (L),
+  WpSpaDevice *d = wp_spa_device_new_from_spa_factory (get_wp_core (L),
       factory, properties);
   if (d)
     wplua_pushobject (L, d);
   return d ? 1 : 0;
+}
+
+static int
+spa_device_iterate_params (lua_State *L)
+{
+  WpSpaDevice *device = wplua_checkobject (L, 1, WP_TYPE_SPA_DEVICE);
+  const gchar *id = luaL_checkstring (L, 2);
+  WpSpaPod *filter = NULL;
+  if (!lua_isnone (L, 3) && !lua_isnil (L, 3))
+    filter = wplua_checkboxed (L, 3, WP_TYPE_SPA_POD);
+  WpIterator *it = wp_spa_device_enum_params_sync (device, id, filter);
+  return push_wpiterator (L, it);
+}
+
+static int
+spa_device_set_param (lua_State *L)
+{
+  WpSpaDevice *device = wplua_checkobject (L, 1, WP_TYPE_SPA_DEVICE);
+  const gchar *id = luaL_checkstring (L, 2);
+  WpSpaPod *pod = wplua_checkboxed (L, 3, WP_TYPE_SPA_POD);
+  wp_spa_device_set_param (device, id, 0, wp_spa_pod_ref (pod));
+  return 0;
 }
 
 static int
@@ -1124,6 +1138,8 @@ spa_device_set_managed_pending (lua_State *L)
 }
 
 static const luaL_Reg spa_device_methods[] = {
+  { "iterate_params", spa_device_iterate_params },
+  { "set_param", spa_device_set_param },
   { "iterate_managed_objects", spa_device_iterate_managed_objects },
   { "get_managed_object", spa_device_get_managed_object },
   { "store_managed_object", spa_device_store_managed_object },
@@ -1145,7 +1161,7 @@ node_new (lua_State *L)
     properties = wp_properties_ref (
         wplua_checkboxed (L, 2, WP_TYPE_PROPERTIES));
 
-  WpNode *d = wp_node_new_from_factory (get_wp_export_core (L),
+  WpNode *d = wp_node_new_from_factory (get_wp_core (L),
       factory, properties);
   if (d)
     wplua_pushobject (L, d);
@@ -1255,7 +1271,7 @@ impl_node_new (lua_State *L)
     properties = wp_properties_ref (wplua_checkboxed (L, 2,
         WP_TYPE_PROPERTIES));
 
-  WpImplNode *d = wp_impl_node_new_from_pw_factory (get_wp_export_core (L),
+  WpImplNode *d = wp_impl_node_new_from_pw_factory (get_wp_core (L),
      factory, properties);
   if (d)
     wplua_pushobject (L, d);
@@ -1399,11 +1415,24 @@ client_attach_permission_manager (lua_State *L)
   return 0;
 }
 
+static int
+client_get_permission_manager (lua_State *L)
+{
+  WpClient *client = wplua_checkobject (L, 1, WP_TYPE_CLIENT);
+  WpPermissionManager *pm = wp_client_get_permission_manager (client);
+  if (pm)
+    wplua_pushobject (L, pm);
+  else
+    lua_pushnil (L);
+  return 1;
+}
+
 static const luaL_Reg client_methods[] = {
   { "update_permissions", client_update_permissions },
   { "update_properties", client_update_properties },
   { "send_error", client_send_error },
   { "attach_permission_manager", client_attach_permission_manager },
+  { "get_permission_manager", client_get_permission_manager },
   { NULL, NULL }
 };
 
@@ -1595,7 +1624,10 @@ pipewire_object_iterate_params (lua_State *L)
 {
   WpPipewireObject *pwobj = wplua_checkobject (L, 1, WP_TYPE_PIPEWIRE_OBJECT);
   const gchar *id = luaL_checkstring (L, 2);
-  WpIterator *it = wp_pipewire_object_enum_params_sync (pwobj, id, NULL);
+  WpSpaPod *filter = NULL;
+  if (!lua_isnone (L, 3) && !lua_isnil (L, 3))
+    filter = wplua_checkboxed (L, 3, WP_TYPE_SPA_POD);
+  WpIterator *it = wp_pipewire_object_enum_params_sync (pwobj, id, filter);
   return push_wpiterator (L, it);
 }
 
@@ -1697,6 +1729,55 @@ static const luaL_Reg state_methods[] = {
   { NULL, NULL }
 };
 
+/* WpStateMetadata */
+
+static int
+state_metadata_new (lua_State *L)
+{
+  const gchar *name = luaL_checkstring (L, 1);
+  WpStateMetadata *state_meta = wp_state_metadata_new (get_wp_core (L), name);
+  wplua_pushobject (L, state_meta);
+  return 1;
+}
+
+static int
+state_metadata_clear (lua_State *L)
+{
+  WpStateMetadata *state_meta = wplua_checkobject (L, 1,
+      WP_TYPE_STATE_METADATA);
+  wp_state_metadata_clear (state_meta);
+  return 0;
+}
+
+static int
+state_metadata_get (lua_State *L)
+{
+  WpStateMetadata *state_meta = wplua_checkobject (L, 1,
+      WP_TYPE_STATE_METADATA);
+  const gchar *key = luaL_checkstring (L, 2);
+  const gchar *v = wp_state_metadata_get (state_meta, key);
+  lua_pushstring (L, v);
+  return 1;
+}
+
+static int
+state_metadata_set (lua_State *L)
+{
+  WpStateMetadata *state_meta = wplua_checkobject (L, 1,
+      WP_TYPE_STATE_METADATA);
+  const gchar *key = luaL_checkstring (L, 2);
+  const gchar *value = luaL_opt (L, luaL_checkstring, 3, NULL);
+  wp_state_metadata_set (state_meta, key, value);
+  return 0;
+}
+
+static const luaL_Reg state_metadata_methods[] = {
+  { "clear", state_metadata_clear },
+  { "get", state_metadata_get },
+  { "set", state_metadata_set },
+  { NULL, NULL }
+};
+
 /* ImplModule */
 
 static int
@@ -1716,7 +1797,7 @@ impl_module_new (lua_State *L)
     properties = wp_properties_ref (wplua_checkboxed (L, 3,
         WP_TYPE_PROPERTIES));
 
-  WpImplModule *m = wp_impl_module_load (get_wp_export_core (L),
+  WpImplModule *m = wp_impl_module_load (get_wp_core (L),
      name, args, properties);
 
   if (m) {
@@ -1726,6 +1807,19 @@ impl_module_new (lua_State *L)
     return 0;
   }
 }
+
+static int
+impl_module_unload (lua_State *L)
+{
+  WpImplModule *m = wplua_checkobject (L, 1, WP_TYPE_IMPL_MODULE);
+  wp_impl_module_unload (m);
+  return 0;
+}
+
+static const luaL_Reg impl_module_methods[] = {
+  { "unload", impl_module_unload },
+  { NULL, NULL }
+};
 
 /* WpConf */
 
@@ -2657,8 +2751,38 @@ permission_manager_set_default_permissions (lua_State *L)
   }
 
   wp_permission_manager_set_default_permissions (pm, perms);
-  lua_pushboolean (L, TRUE);
+  return 0;
+}
+
+static int
+permission_manager_get_default_permissions (lua_State *L)
+{
+  WpPermissionManager *pm = wplua_checkobject (L, 1,
+      WP_TYPE_PERMISSION_MANAGER);
+  guint32 perms = wp_permission_manager_get_default_permissions (pm);
+  lua_pushinteger (L, perms);
   return 1;
+}
+
+static int
+permission_manager_set_core_permissions (lua_State *L)
+{
+  WpPermissionManager *pm = wplua_checkobject (L, 1,
+      WP_TYPE_PERMISSION_MANAGER);
+  guint32 perms = PW_PERM_ALL;
+
+  if (lua_isinteger (L, 2)) {
+    perms = luaL_checkinteger (L, 2);
+  } else if (lua_isstring (L, 2)) {
+    const gchar *perms_str = luaL_checkstring (L, 2);
+    if (!client_parse_permissions (perms_str, &perms))
+      luaL_error (L, "invalid permission string: '%s'", perms_str);
+  } else {
+    luaL_error (L, "invalid permission argument");
+  }
+
+  wp_permission_manager_set_core_permissions (pm, perms);
+  return 0;
 }
 
 static int
@@ -2726,11 +2850,89 @@ permission_manager_update_permissions (lua_State *L)
 
 static const luaL_Reg permission_manager_funcs[] = {
   { "set_default_permissions", permission_manager_set_default_permissions },
+  { "get_default_permissions", permission_manager_get_default_permissions },
+  { "set_core_permissions", permission_manager_set_core_permissions },
   { "add_interest_match", permission_manager_add_interest_match },
   { "add_interest_match_simple", permission_manager_add_interest_match_simple },
   { "add_rules_match", permission_manager_add_rules_match },
   { "remove_match", permission_manager_remove_match },
   { "update_permissions", permission_manager_update_permissions },
+  { NULL, NULL }
+};
+
+/* WpDynamicRules */
+
+static int
+dynamic_rules_new (lua_State *L)
+{
+  WpDynamicRules *dr = wp_dynamic_rules_new (get_wp_core (L));
+  wplua_pushobject (L, dr);
+  return 1;
+}
+
+static int
+dynamic_rules_add_condition_rule (lua_State *L)
+{
+  WpDynamicRules *dr = wplua_checkobject (L, 1, WP_TYPE_DYNAMIC_RULES);
+  WpObjectInterest *matches = wplua_checkboxed (L, 2, WP_TYPE_OBJECT_INTEREST);
+  WpSpaJson *actions = wplua_checkboxed (L, 3, WP_TYPE_SPA_JSON);
+  GClosure *closure = wplua_function_to_closure (L, 4);
+  guint32 id;
+
+  id = wp_dynamic_rules_add_condition_rule_closure (dr,
+      wp_object_interest_ref (matches), wp_spa_json_ref (actions), closure);
+  lua_pushinteger (L, id);
+  return 1;
+}
+
+static int
+dynamic_rules_add_json_rule (lua_State *L)
+{
+  WpDynamicRules *dr = wplua_checkobject (L, 1, WP_TYPE_DYNAMIC_RULES);
+  WpSpaJson *json_rule = wplua_checkboxed (L, 2, WP_TYPE_SPA_JSON);
+  guint32 id;
+
+  id = wp_dynamic_rules_add_json_rule (dr, wp_spa_json_ref (json_rule));
+  lua_pushinteger (L, id);
+  return 1;
+}
+
+static int
+dynamic_rules_remove_rule (lua_State *L)
+{
+  WpDynamicRules *dr = wplua_checkobject (L, 1, WP_TYPE_DYNAMIC_RULES);
+  guint32 rule_id = luaL_checkinteger (L, 2);
+
+  wp_dynamic_rules_remove_rule (dr, rule_id);
+  return 0;
+}
+
+static int
+dynamic_rules_add_object (lua_State *L)
+{
+  WpDynamicRules *dr = wplua_checkobject (L, 1, WP_TYPE_DYNAMIC_RULES);
+  WpGlobalProxy *object = wplua_checkobject (L, 2, WP_TYPE_GLOBAL_PROXY);
+
+  wp_dynamic_rules_add_object (dr, object);
+  return 0;
+}
+
+static int
+dynamic_rules_remove_object (lua_State *L)
+{
+  WpDynamicRules *dr = wplua_checkobject (L, 1, WP_TYPE_DYNAMIC_RULES);
+  WpGlobalProxy *object = wplua_checkobject (L, 2, WP_TYPE_GLOBAL_PROXY);
+
+  wp_dynamic_rules_remove_object (dr, object);
+  return 0;
+}
+
+static const luaL_Reg dynamic_rules_funcs[] = {
+  { "add_condition_rule", dynamic_rules_add_condition_rule },
+  { "add_json_rule", dynamic_rules_add_json_rule },
+  { "remove_rule", dynamic_rules_remove_rule },
+  { "add_object", dynamic_rules_add_object },
+  { "remove_object", dynamic_rules_remove_object },
   { NULL, NULL }
 };
 
@@ -2965,7 +3167,14 @@ async_event_hook_execute_step (lua_State *L)
 
   wplua_pushboxed (L, WP_TYPE_EVENT, wp_event_ref (event));
   wplua_pushobject (L, g_object_ref (transition));
-  lua_call (L, 2, 0);
+  /* A step that raises must still complete its transition, otherwise the event
+   * dispatcher keeps waiting for this hook. */
+  if (G_UNLIKELY (lua_pcall (L, 2, 0, 0) != LUA_OK)) {
+    wp_transition_return_error (transition, g_error_new (WP_DOMAIN_LIBRARY,
+        WP_LIBRARY_ERROR_INVARIANT, "error executing step '%s': %s",
+        step_str, lua_tostring (L, -1)));
+    lua_pop (L, 1);
+  }
   return 0;
 }
 
@@ -3241,8 +3450,10 @@ wp_lua_scripting_api_init (lua_State *L)
       NULL, pipewire_object_methods);
   wplua_register_type_methods (L, WP_TYPE_STATE,
       state_new, state_methods);
+  wplua_register_type_methods (L, WP_TYPE_STATE_METADATA,
+      state_metadata_new, state_metadata_methods);
   wplua_register_type_methods (L, WP_TYPE_IMPL_MODULE,
-      impl_module_new, NULL);
+      impl_module_new, impl_module_methods);
   wplua_register_type_methods (L, WP_TYPE_EVENT,
       NULL, event_methods);
   wplua_register_type_methods (L, WP_TYPE_EVENT_HOOK,
@@ -3263,6 +3474,8 @@ wp_lua_scripting_api_init (lua_State *L)
       properties_new, properties_funcs);
   wplua_register_type_methods (L, WP_TYPE_PERMISSION_MANAGER,
       permission_manager_new, permission_manager_funcs);
+  wplua_register_type_methods (L, WP_TYPE_DYNAMIC_RULES,
+      dynamic_rules_new, dynamic_rules_funcs);
 
   if (!wplua_load_uri (L, URI_API, &error) ||
       !wplua_pcall (L, 0, 0, &error)) {

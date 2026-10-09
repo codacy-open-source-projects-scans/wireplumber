@@ -57,6 +57,9 @@ SimpleEventHook {
             log:warning (link, "Link was not activated before removing")
           end
           si_flags.peer_id = nil
+          if link.properties:get_boolean ("is.role.policy.link") then
+            lutils.clearPriorityMediaRoleLink (link)
+          end
           link:remove ()
           log:info (si, "... moving to new target")
         end
@@ -69,10 +72,9 @@ SimpleEventHook {
     end
 
     -- if the stream has dont-reconnect and was already linked before,
-    -- don't link it to a new target
+    -- don't link it to a new target; destroy it instead
     if not reconnect and si_flags.was_handled then
       target = nil
-      goto done
     end
 
     -- check target's availability

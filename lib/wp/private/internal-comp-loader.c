@@ -9,6 +9,7 @@
 #include "internal-comp-loader.h"
 #include "wp.h"
 #include "registry.h"
+#include "client-context.h"
 
 #include <pipewire/impl.h>
 
@@ -744,26 +745,20 @@ ensure_no_media_session (GTask * task, WpCore * core, WpSpaJson * args)
 }
 
 static void
-load_export_core (GTask * task, WpCore * core, WpSpaJson * args)
+load_client_context (GTask * task, WpCore * core, WpSpaJson * args)
 {
-  g_autofree gchar *export_core_name = NULL;
-  g_autoptr (WpCore) export_core = NULL;
-  g_autoptr (WpProperties) props = wp_core_get_properties (core);
-  const gchar *str = NULL;
+  g_autoptr (GError) error = NULL;
+  WpClientContext *ctx = NULL;
 
-  wp_info_object (core, "connecting export core to pipewire...");
+  wp_info_object (core, "starting the client context...");
 
-  str = wp_properties_get (props, PW_KEY_APP_NAME);
-  export_core_name =
-      g_strdup_printf ("%s [export]", str ? str : "WirePlumber");
+  ctx = wp_client_context_new (core, args, &error);
+  if (!ctx) {
+    g_task_return_error (task, g_steal_pointer (&error));
+    return;
+  }
 
-  export_core = wp_core_clone (core);
-  wp_core_update_properties (export_core, wp_properties_new (
-        PW_KEY_APP_NAME, export_core_name,
-        "wireplumber.export-core", "true",
-        NULL));
-
-  g_task_return_pointer (task, g_steal_pointer (&export_core), g_object_unref);
+  g_task_return_pointer (task, ctx, g_object_unref);
 }
 
 static void
@@ -785,7 +780,11 @@ static const struct {
   void (*load) (GTask *, WpCore *, WpSpaJson *);
 } builtin_components[] = {
   { "ensure-no-media-session", ensure_no_media_session },
-  { "export-core", load_export_core },
+  { "client-context", load_client_context },
+  /* "export-core" used to make a second connection to PipeWire on the main
+     loop; it is superseded by the client context, which does that and more.
+     Kept as an alias so that older configuration files keep working. */
+  { "export-core", load_client_context },
   { "settings-instance", load_settings_instance },
 };
 
@@ -915,6 +914,7 @@ wp_internal_comp_loader_supports_type (WpComponentLoader * cl,
 {
   return g_str_equal (type, "module") ||
          g_str_equal (type, "pw-module") ||
+         g_str_equal (type, "pw-module-client") ||
          g_str_equal (type, "virtual") ||
          g_str_equal (type, "built-in") ||
          g_str_equal (type, "profile") ||
@@ -990,6 +990,21 @@ wp_internal_comp_loader_load (WpComponentLoader * self, WpCore * core,
       }
       else {
         g_task_return_pointer (task, NULL, NULL);
+      }
+    }
+    else if (g_str_equal (type, "pw-module-client")) {
+      g_autofree gchar *module_args = args ?
+          g_strndup (wp_spa_json_get_data (args), wp_spa_json_get_size (args)) :
+          NULL;
+      WpImplModule *m = wp_impl_module_load (core, component, module_args, NULL);
+
+      if (!m) {
+        g_task_return_new_error (task, WP_DOMAIN_LIBRARY,
+            WP_LIBRARY_ERROR_OPERATION_FAILED,
+            "Failed to load pipewire module %s: %s", component, strerror (errno));
+      }
+      else {
+        g_task_return_pointer (task, m, g_object_unref);
       }
     }
     else if (g_str_equal (type, "virtual")) {

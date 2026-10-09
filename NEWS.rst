@@ -1,5 +1,255 @@
-WirePlumber 0.5.14
+WirePlumber 0.5.18
 ~~~~~~~~~~~~~~~~~~
+
+Additions & Enhancements:
+
+  - Improved ``find-best-profile`` to rank profiles on the availability of
+    their output routes before their priority, so that UCM cards bundling
+    HDMI outputs together with speakers or headphones no longer select a
+    profile whose analog output is unplugged when a monitor is connected
+    (#683; !885)
+
+  - Improved HDMI node descriptions: the monitor name is now taken from
+    ``hdmi.product.name`` (set by PipeWire from the current ELD) so that it
+    is correct for displays switched on after the card was set up, the
+    ``alsa.name`` suffix is also shown for UCM devices, the ELD-detected
+    channel layout is shown for UCM devices, and the channel suffix is added
+    after ``monitor.alsa.rules`` are applied (!904, !905, !910, !912, !913)
+
+  - Improved the ALSA node error recovery to allow at most 3 attempts per
+    device (reset after 60s without errors), instead of looping forever on
+    devices that keep failing after being re-opened (#1024; !908)
+
+Fixes:
+
+  - Fixed ``WpImplModule`` to load and destroy modules on the client
+    context's thread, avoiding unsafe teardown of modules such as
+    filter-chain with LV2 plugins (#1029; !917)
+
+  - Fixed ``autoswitch-bluetooth-profile`` in several scenarios: it no longer
+    gets overridden by ``EnumProfile`` triggered profile selection, a pending
+    profile restore is cancelled when a headset profile is applied explicitly
+    (fixing HFP capture dying shortly after starting), and filter chains
+    such as EasyEffects are now correctly followed to the Bluetooth
+    loopback source (#1002, #1013, #1023; !892, !897, !909, !914)
+
+  - Fixed a failed node creation or an error raised in a Lua async event hook
+    step freezing the event dispatcher, and made the v4l2 monitor advance
+    its transition when a device is disabled (#1004; !894)
+
+  - Fixed ``software-dsp`` leaking hidden parent node ids, which caused nodes
+    created later with a reused id to be hidden from every new client
+    (#1028; !918)
+
+  - Fixed the linking policy to to bypass ``find-media-role-target`` for smart
+    filters and to defer immediate linking for any node with a link-group,
+    avoiding linking cycles when smart filters have ``media.role`` set
+    (#1015; !901, !903)
+
+  - Fixed ``prepare-link`` to destroy ``dont-reconnect`` streams when their
+    target is removed, as it was done in 0.4, instead of leaving them
+    unlinked forever (#1026; !915)
+
+  - Fixed ``default-nodes`` to rank stored nodes by their position in the
+    stack only, so that ``priority.session`` no longer overrides the user's
+    most recent selection (#1005; !902)
+
+  - Fixed the access scripts to activate permission managers when they load,
+    so that their permissions are ready before any client connects, instead
+    of letting the first short-lived client see hidden devices (#1021; !900)
+
+  - Fixed disabling ``device.restore-profile`` at runtime, which was still
+    saving profiles (!911)
+
+  - Fixed a use-after-free in ``module-settings`` on malformed configuration,
+    and also the active call count in ``module-modem-manager`` on reconnect
+    (!896)
+
+Past releases
+~~~~~~~~~~~~~
+
+WirePlumber 0.5.17
+..................
+
+Highlights:
+
+  - This release fixes a significant regression introduced in version 0.5.16.
+    Users are strongly encouraged to upgrade to this release and avoid using 0.5.16.
+
+Fixes:
+
+  - Fixed factory-created device, node and link objects to stop sharing
+    ownership with their registry global, fixing a regression from the
+    ``WpClientContext`` introduced in 0.5.16 that broke proper object
+    destruction in the monitor scripts (#999; !890, !891)
+
+  - Improved ``default-nodes`` to also rank on the object.serial of a node's
+    device and on the node's own object.serial, so that route priorities
+    are only compared between nodes of the same card, and the election no
+    longer changes for no apparent reason when all other keys are equal
+    (!893)
+
+  - Fixed ``m-lua-scripting`` to include the offending Lua type name in POD
+    build errors (!889)
+
+WirePlumber 0.5.16
+..................
+
+Additions & Enhancements:
+
+  - Added ``WpClientContext``, a second PipeWire connection running on its
+    own thread that hosts WirePlumber's in-process media objects (loopback
+    and filter-chain modules, ``LocalNode()``, ``SpaDevice()``), so that slow
+    Lua event hooks on the main thread no longer stall their control path;
+    the export core is retired in favor of this new client context (!873)
+
+  - Added new ``WpDynamicRules`` class for matching rules with conditions,
+    and updated ``filter-graph.lua`` to use it, allowing filter-graphs to be
+    loaded and unloaded dynamically depending on whether other objects exist
+    or not (!872)
+
+  - Added ``wp_impl_module_unload()`` and ``LocalModule:unload()``, giving
+    scripts control to unload implemented modules at any time (!881)
+
+  - Added a ``volume-set`` action to ``module-mpris`` to allow adjusting the
+    volume of a remote MPRIS2 player from Lua (!860)
+
+  - Added ``--yes`` flag to ``wpctl reset`` to skip the confirmation prompt
+    (!850)
+
+  - Added ``device.form-factor`` ALSA node property for use in ALSA rules, and
+    made HDMI node descriptions include the name of the connected display when
+    available (!862, !874)
+
+  - Refactored the Bluetooth monitor to use event hooks for handling devices
+    and nodes, matching the design already used by the v4l2 and libcamera
+    monitors (#916; !803)
+
+  - Overhauled the documentation: filled in every stub and missing Lua API
+    and C API page, added a getting started guide, new ``wireplumber(1)``
+    and ``wpexec(1)`` man pages, and removed stale pages describing features
+    renamed or removed in the 0.4 to 0.5 transition (!877)
+
+Fixes:
+
+  - Fixed monitors to always activate all device and node features, and made
+    monitors wait for successful device activation before storing the devices
+    and nodes as a managed objects (#986, #996; !883, !886, !876)
+
+  - Fixed ``find-preferred-profile`` to skip a configured preferred profile
+    that is not available, instead of leaving no profile selected
+    (#993; !884)
+
+  - Fixed ``permission-manager`` to not include destroyed globals when
+    rebuilding the permissions array on ``objects-changed``, fixing some
+    pipewire warnings in the log (!882, !888)
+
+  - Fixed a memory leak in ``WpSpaDevice`` by only collecting params from
+    our own requests (#988; !879)
+
+  - Fixed ``filter-graph`` to correctly apply graphs defined for the same
+    node across multiple configuration files (!870)
+
+  - Fixed several nil-related crashes and correctness issues in Lua scripts
+    (#972; !861, !864, !866, !869)
+
+  - Improved ``apply-access`` to directly attach an already-active permission
+    manager to the client instead of wastefully re-running activation on it
+    (#973; !868)
+
+  - Improved ``state-stream`` change detection to avoid spurious state
+    writes from volume rounding and from unset or empty properties
+    (#974; !867)
+
+  - Fixed ``default-nodes`` to ignore smart filters when selecting the best
+    default node (!857)
+
+  - Removed the ``node.filter.forward-format`` setting and its script,
+    which only worked with 0.4 and never really worked with 0.5 (!878)
+
+WirePlumber 0.5.15
+..................
+
+Additions & Enhancements:
+
+  - Added new ``WpPermissionManager`` API that centralizes access control for
+    clients, with support for attaching permission managers to clients from Lua
+    scripts; the client access scripts have been completely refactored to use
+    the new API with a ``select-access`` event and a priority fallback
+    mechanism: configuration, flatpak, snap, portal, and default (!797, !822, !825)
+
+  - Added new ``WpStateMetadata`` class that mirrors the persistent state into
+    a PipeWire metadata object, allowing users to clear or change saved device
+    profiles at runtime using ``pw-metadata`` (!818)
+
+  - Added ``set_param()``, ``enum_params_sync()`` and ``params-changed`` signal
+    to ``WpSpaDevice``, and an ``event`` signal for SPA device events, allowing
+    monitors to directly interact with SPA devices and react to profile changes
+    without going through the global ``WpDevice`` object (!835, !842)
+
+  - Added ``list`` subcommand to wpctl for displaying PipeWire objects in a
+    script-friendly format, with bash completions (!805, !823)
+
+  - Added ``reset`` command to wpctl to reset the state of WirePlumber and PipeWire
+    to installation defaults (!848, !849)
+
+  - Enhanced wpctl to connect to the manager socket when available, giving the
+    tool unrestricted access to the PipeWire graph (!814)
+
+  - Added new ``bluetooth.profile-preference`` setting to
+    ``find-preferred-profile`` for selecting quality or latency A2DP profiles (!819)
+
+  - Added a cache for camera permission checks in the portal access module to
+    avoid frequent D-Bus calls; also added a 3-second timeout and fixed the
+    ``Set`` create parameter in ``portal-permissionstore`` (!820, !821)
+
+Fixes:
+
+  - Fixed wpctl set-volume by PID to apply the same volume level to all
+    matching nodes (#944; !829)
+
+  - Fixed portal clients to be un-gated immediately after permission setup,
+    preventing them from remaining blocked (#941; !826)
+
+  - Fixed ALSA monitor to set the device profile to Off and restore it when a
+    node enters an error state, forcing a close/reopen of the device to recover
+    from broken ALSA device states (!837)
+
+  - Fixed voice call profile selection to not skip profiles with ``unknown``
+    availability (!834)
+
+  - Fixed memory leak in Lua scripting by only holding a strong reference of
+    the Lua state when a script is activated, preventing leaked proxy warning
+    messages on core disconnect (!844)
+
+  - Fixed ``state-stream`` to only use the ``media.role`` key when its value
+    is ``Notification`` when forming the stream state lookup key (!845)
+
+  - Fixed ``pw-obj-mixin`` to apply the active filter when enumerating cached
+    params and to deduplicate subscribed param IDs (!839, !840)
+
+  - Fixed ``m-lua-scripting`` to validate Bool values in ``Pod.Choice.Enum``
+    (!841)
+
+  - Fixed shutdown sequence to properly deactivate all objects and plugins
+    before teardown (#881; !833)
+
+  - Fixed Bluetooth to not set ``bluez5.autoswitch-routes`` on BT devices
+    (!811)
+
+  - Fixed null pointer dereference in ``permission-manager`` (!812)
+
+  - Fixed module destructor ordering to call the parent destructor before
+    finalizing internal state (!813)
+
+  - Fixed nil value when logging in ``state-profile`` (!815)
+
+  - Fixed gobject-introspection issue on ``spa-pod`` to correctly generate Python bindings (!828)
+
+  - Updated translations: Chinese, Serbian, Serbian Latin
+
+WirePlumber 0.5.14
+....................
 
 Additions & Enhancements:
 
@@ -66,9 +316,6 @@ Fixes:
   - Fixed Lua 5.4 compatibility in ``state-stream`` script
 
   - Updated translations: Bulgarian, Georgian, Kazakh, Swedish
-
-Past releases
-~~~~~~~~~~~~~
 
 WirePlumber 0.5.13
 ..................
@@ -521,7 +768,7 @@ Additions:
     configuration files are found in the system. (#611)
 
   - The "policy-dsp" script, used in Asahi Linux to provide a software DSP
-    for Apple Sillicon devices, has now been ported to 0.5 properly and
+    for Apple Silicon devices, has now been ported to 0.5 properly and
     documented (#619, !627)
 
 WirePlumber 0.5.0
@@ -638,7 +885,7 @@ Other changes:
   - Fixed multiple issues related to restoring the Route parameter of devices,
     which includes volume state (#551)
 
-  - Smart filters can now be targetted by specific streams directly when
+  - Smart filters can now be targeted by specific streams directly when
     the ``filter.smart.targetable`` property is set (#554)
 
   - Ported the mechanism to override device profile priorities in the
@@ -1723,7 +1970,7 @@ Changes since 0.2.95:
   - Fixed an issue where links between the si-convert audioconvert nodes and
     the actual device nodes would stay active forever; they are now declared
     as "passive" links, which allows the nodes to suspend. This requires
-    changes to PipeWire that were commited after 0.3.6; when using WirePlumber
+    changes to PipeWire that were committed after 0.3.6; when using WirePlumber
     with 0.3.5 or 0.3.6, it is recommended to disable streams on audio sinks
     by commenting out the ``streams = "audio-sink.streams"`` lines in the
     .endpoint configuration files
@@ -1752,7 +1999,7 @@ adds a couple of features that ``pipewire-media-session`` lacks, such as:
   - It is configurable:
 
     - It supports configuration of endpoints, so that their properties
-      (such as their name) can be overriden
+      (such as their name) can be overridden
 
     - It also supports declaring priorities on endpoints, so that there
       are sane defaults on the first start

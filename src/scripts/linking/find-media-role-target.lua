@@ -8,6 +8,7 @@
 
 cutils = require("common-utils")
 lutils = require("linking-utils")
+futils = require("filter-utils")
 log = Log.open_topic("s-linking")
 
 SimpleEventHook {
@@ -33,6 +34,13 @@ SimpleEventHook {
       return
     end
 
+    -- bypass the hook if the stream is a smart filter
+    local si_link_group = si_props["node.link-group"]
+    if si_link_group and
+        futils.is_filter_smart (target_direction, si_link_group) then
+      return
+    end
+
     log:info (si, string.format ("handling item %d: %s (%s) role (%s)", si.id,
       tostring (si_props ["node.name"]), tostring (si_props ["node.id"]), media_role))
 
@@ -47,7 +55,7 @@ SimpleEventHook {
       local roles_table = Json.Raw(roles_json):parse()
 
       for _, target_role in ipairs(roles_table) do
-        if target_role == media_role then
+        if target_role == media_role and lutils.canLink (si_props, si_target) then
           target = si_target
           break
         end

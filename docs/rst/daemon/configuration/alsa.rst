@@ -46,6 +46,9 @@ Example:
    taken directly from PulseAudio and provides devices that look and feel
    exactly like the PulseAudio devices.
 
+The remaining monitor properties are listed under "ALSA PROPERTIES / Monitor
+properties" in `pipewire-props(7)`_.
+
 Rules
 -----
 
@@ -87,17 +90,40 @@ Example:
          # Apply all the desired node specific settings here.
          update-props = {
            node.nick              = "My Node"
-           priority.driver        = 100
+           priority.session       = 100
            session.suspend-timeout-seconds = 5
          }
        }
      }
    ]
 
+Where the properties are documented
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The names that appear inside ``update-props`` are PipeWire object properties.
+They are not defined by WirePlumber: they are implemented by the ALSA SPA
+plugin and by the audio adapter that PipeWire attaches to every audio node.
+Their complete reference is the ``pipewire-props(7)`` man page, which is also
+available online at https://docs.pipewire.org/page_man_pipewire-props_7.html
+
+That man page covers the common device properties, the common node properties
+(identifying, classifying, scheduling, session manager and format properties),
+the audio adapter properties (merger, resampler and channel mixer, including
+all the ``channelmix.*`` and ``resample.*`` properties) and the ALSA-specific
+device and node properties. Note that only a part of it is ALSA-specific: the
+common and audio adapter properties apply to Bluetooth nodes and to
+application streams as well.
+
+The two sections below are **a selection only** - the properties that are most
+commonly changed on ALSA devices, plus the bits whose behavior is specific to
+WirePlumber. For anything that is not listed here, refer to
+`pipewire-props(7)`_.
+
 Device properties
 ^^^^^^^^^^^^^^^^^
 
-The following properties can be configured on devices created by the monitor:
+A selection of the properties that are commonly set on devices created by the
+monitor:
 
 .. describe:: api.alsa.use-acp
 
@@ -144,139 +170,104 @@ The following properties can be configured on devices created by the monitor:
 
    :Type: string
 
-.. describe:: device.profile
-
-   The initial active profile name. The default is to start from the "Off"
-   profile and then let WirePlumber select the best profile based on its
-   policy.
-
-   :Type: string
-
-.. describe:: api.acp.auto-profile
-
-   Automatically select the best profile for the device. Normally this option is
-   disabled because WirePlumber will manage the profile of the device.
-   WirePlumber can save and load previously selected profiles. Enable this in
-   custom configurations where the relevant WirePlumber components are disabled.
-
-   :Type: boolean
-
-.. describe:: api.acp.auto-port
-
-   Automatically select the highest priority port that is available ("port" is a
-   PulseAudio/ACP term, the equivalent of a "Route" in PipeWire). This is by
-   default disabled because WirePlumber handles the task of selecting and
-   restoring Routes. Enable this in custom configurations where the relevant
-   WirePlumber components are disabled.
-
-   :Type: boolean
-
-.. describe:: api.acp.probe-rate
-
-   Sets the samplerate used for probing the ALSA devices and collecting the
-   profiles and ports.
-
-   :Type: integer
-
-.. describe:: api.acp.pro-channels
-
-   Sets the number of channels to use when probing the "Pro Audio" profile.
-   Normally, the maximum amount of channels will be used but with this setting
-   this can be reduced, which can make it possible to use other samplerates on
-   some devices.
-
-   :Type: integer
-
-Some of the other properties that can be configured on devices:
-
-.. describe:: device.nick
-
-   A short name for the device.
-
-.. describe:: device.description
-
-   A longer, user-friendly name of the device. This will show up in most
-   user interfaces as the device's name.
-
 .. describe:: device.disabled
 
-   Disables the device. PipeWire will remove it from the list of cards or
-   devices.
+   Disables the device. WirePlumber will not create it at all, so it will not
+   appear in the list of cards or devices.
 
    :Type: boolean
+
+.. note::
+
+   Profile and route (ACP "port") selection is handled by WirePlumber itself,
+   which is why the ``api.acp.auto-profile`` and ``api.acp.auto-port``
+   properties described in `pipewire-props(7)`_ are disabled by default. They
+   are only useful in custom configurations where the relevant WirePlumber
+   components are disabled. To influence WirePlumber's own choice of profile,
+   see `Profile priorities`_ below.
 
 Node properties
 ^^^^^^^^^^^^^^^
 
-The following properties can be configured on nodes created by the monitor:
+A selection of the properties that are commonly set on nodes created by the
+monitor:
 
-.. describe:: priority.driver
+.. describe:: node.description
 
-   This configures the node driver priority. Nodes with higher priority will be
-   used as a driver in the graph. Other nodes with lower priority will have to
-   resample to the driver node when they are joined in the same graph. The
-   default value is set based on some heuristics.
+   A user-friendly name for the node. This is what most user interfaces show
+   as the name of the sink or source.
 
-   :Type: integer
+   :Type: string
+
+.. describe:: node.disabled
+
+   Disables the node. WirePlumber will not create it at all, so it will not
+   appear in the list of nodes.
+
+   :Type: boolean
 
 .. describe:: priority.session
 
-   This configures the priority of the node when selecting a default node
-   (default sink/source as a link target for streams). Higher priority nodes
-   will be more likely candidates for becoming the default node.
+   The priority of the node when selecting the default sink or source; see
+   :ref:`config_priorities`.
 
    :Type: integer
 
-   .. note::
+.. describe:: priority.driver
 
-      By default, sources have a ``priority.session`` value around 1600-2000 and
-      sinks have a value around 600-1000. If you are increasing the priority of
-      a sink, it is **not advised** to use a value higher than 1500, as it may
-      cause a sink's monitor to be selected as the default source.
+   The priority of the node when PipeWire picks the driver of a graph. It does
+   not normally need to be set; see `pipewire-props(7)`_.
 
-.. describe:: node.pause-on-idle
-
-   Pause the node when nothing is linked to it anymore. This is by default false
-   because some devices make a "pop" sound when they are opened/closed.
-   The node will normally pause and suspend after a timeout (see below).
-
-   :Type: boolean
+   :Type: integer
 
 .. describe:: session.suspend-timeout-seconds
 
    This option configures a different suspend timeout on the node. By default
    this is ``5`` seconds. For some devices (HiFi amplifiers, for example) it
    might make sense to set a higher timeout because they might require some time
-   to restart after being idle.
+   to restart after being idle. Fractions of a second, such as ``0.5``, are
+   allowed.
 
    A value of ``0`` disables suspend for a node and will leave the ALSA device
    busy. The device can then be manually suspended with
    ``pactl suspend-sink|source``.
 
-   :Type: integer
+   :Type: float
 
-.. describe:: audio.format
+.. describe:: node.slow-resume
 
-   The sample format of the device. By default, PipeWire will use a 32 bits
-   sample format but a different format can be set here.
+   Marks a node whose device takes a long time to resume from suspend, such as
+   a capture device that needs hundreds of milliseconds to power up. This
+   property applies to any node, not only ALSA ones.
 
-   :Type: string (``"S16LE"``, ``"S32LE"``, ``"F32LE"``, ...)
+   A client can ask for slow-resume nodes to be left idle instead of being
+   suspended while it is connected, so that streams it starts on them don't
+   wait for the device to resume. It does this by setting
+   ``session.fast-capture-start`` to ``true`` for sources, or
+   ``session.fast-playback-start`` to ``true`` for sinks, in its properties.
+   When the last client asking for a node disconnects, the node is suspended
+   after its ``session.suspend-timeout-seconds``.
 
-.. describe:: audio.rate
+   :Type: boolean
 
-   The sample rate of the device. By default, the ALSA device will be configured
-   with the same samplerate as the global graph. If this is not supported, or a
-   custom value is set here, resampling will be used to match the graph rate.
+   Example, marking every ALSA capture source as slow to resume:
 
-   :Type: integer
+   .. code-block::
 
-.. describe:: audio.channels
-
-   The number of channels of the device. By default the channels and their
-   position are determined by the selected device profile. You can override
-   this setting here.
-
-   :Type: integer
+      monitor.alsa.rules = [
+        {
+          matches = [
+            {
+              node.name = "~alsa_input.*"
+            }
+          ]
+          actions = {
+            update-props = {
+              node.slow-resume = true
+            }
+          }
+        }
+      ]
 
 .. describe:: audio.position
 
@@ -285,53 +276,6 @@ The following properties can be configured on nodes created by the monitor:
    this setting here and optionally swap or reconfigure the channel positions.
 
    :Type: array of strings (example: ``["FL", "FR", "LFE", "FC", "RL", "RR"]``)
-
-.. describe:: api.alsa.use-chmap
-
-    Use the channel map as reported by the driver. This is disabled by default
-    because it is often wrong and the ACP code handles this better.
-
-    :Type: boolean
-
-.. describe:: api.alsa.disable-mmap
-
-   Disable the use of mmap for the ALSA device. By default, PipeWire will access
-   the memory of the device using mmap. This can be disabled and force the usage
-   of the slower read and write access modes, in case the mmap support of the
-   device is not working properly.
-
-   :Type: boolean
-
-.. describe:: channelmix.normalize
-
-   Normalize the channel volumes when mixing & resampling, making sure that the
-   original 0 dB level is preserved so that nothing sounds wildly
-   quieter/louder. This is disabled by default.
-
-   :Type: boolean
-
-.. describe:: channelmix.mix-lfe
-
-   Creates a "center" channel for X.0 recordings from the front stereo on X.1
-   setups and pushes some low-frequency/bass from the "center" of X.1 recordings
-   into the front stereo on X.0 setups. This is disabled by default.
-
-   :Type: boolean
-
-.. describe:: monitor.channel-volumes
-
-   By default, the volume of the sink/source does not influence the volume on
-   the monitor ports. Set this option to true to change this. PulseAudio has
-   inconsistent behaviour regarding this option, it applies channel-volumes only
-   when the sink/source is using software volumes.
-
-   :Type: boolean
-
-.. describe:: node.disabled
-
-   Disables the node. Pipewire will remove it from the list of the nodes.
-
-   :Type: boolean
 
 ALSA buffer properties
 ......................
@@ -457,18 +401,6 @@ Set the internal latency to 256 samples:
     remote 0 port 74 changed
     remote 0 port 76 changed
 
-Startup tweaks
-..............
-
-.. describe:: api.alsa.start-delay
-
-   Some devices need some time before they can report accurate hardware pointer
-   positions. In those cases, an extra start delay can be added to compensate
-   for this startup delay. This sets the startup delay in samples. The default
-   is 0.
-
-   :Type: integer (samples)
-
 IEC958 (S/PDIF) passthrough
 ...........................
 
@@ -483,3 +415,83 @@ IEC958 (S/PDIF) passthrough
    ``pw-cli s <node-id> Props '{ iec958Codecs : [ PCM ] }'``
 
    :Type: array of strings (example: ``[ "PCM", "DTS", "AC3", "EAC3", "TrueHD", "DTS-HD" ]``)
+
+ALSA MIDI
+---------
+
+The ALSA MIDI monitor bridges the ALSA sequencer into PipeWire as a single
+node. It is enabled by the ``monitor.alsa-midi`` feature; see
+:ref:`config_features`.
+
+.. describe:: monitor.alsa-midi.properties
+
+   Properties for the MIDI bridge node.
+
+   .. code-block::
+
+      monitor.alsa-midi.properties = {
+        ## Name set for the node with ALSA MIDI ports
+        node.name = "Midi-Bridge"
+
+        ## Removes longname/number from MIDI port names
+        api.alsa.disable-longname = false
+      }
+
+   The properties that are accepted here are listed under "ALSA MIDI
+   PROPERTIES" in `pipewire-props(7)`_.
+
+.. _config_profile_priority_rules:
+
+Profile priorities
+------------------
+
+When no profile has been stored for a device and none is forced by other
+means, WirePlumber picks the best available profile. Profiles are compared
+first on the number of output routes they can actually play on -- the ones that
+are available plus the ones whose availability is unknown -- and only then on
+the profile priority.
+
+Route availability is taken into account because a profile is reported as
+available when any single one of its routes is available. On cards whose UCM
+description bundles the HDMI outputs together with either the speakers or the
+headphones, that flag is set almost all of the time, so ranking on the priority
+number alone selects profiles whose analog output is not plugged in. Routes of
+unknown availability are counted as usable because built-in speakers get no
+jack detection and are therefore never reported as available. Devices that do
+not report which profiles their routes belong to are unaffected and are ranked
+on priority as before.
+
+The ``device.profile.priority.rules`` section allows overriding that choice by
+naming an explicit order of preferred profiles for matching devices.
+
+The rules are matched against device properties, and the ``update-props``
+action sets a ``priorities`` property holding a JSON array of profile names,
+most preferred first:
+
+.. code-block::
+
+   device.profile.priority.rules = [
+     {
+       matches = [
+         { device.name = "~alsa_card.*" }
+       ]
+       actions = {
+         update-props = {
+           priorities = [ "pro-audio", "output:analog-stereo" ]
+         }
+       }
+     }
+   ]
+
+The first profile in the list that is actually available on the device is
+selected. If none of them is available, WirePlumber falls back to the ranking
+described above.
+
+.. note::
+
+   This section applies to all devices, not only ALSA ones. For Bluetooth
+   devices, the ``bluetooth.profile-preference`` setting provides a simpler way
+   of expressing a quality-versus-latency preference; see
+   :ref:`config_settings` and :ref:`config_bluetooth`.
+
+.. _pipewire-props(7): https://docs.pipewire.org/page_man_pipewire-props_7.html

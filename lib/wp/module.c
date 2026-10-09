@@ -8,6 +8,7 @@
 
 #include "module.h"
 #include "log.h"
+#include "private/client-context.h"
 
 #include <pipewire/impl.h>
 
@@ -21,6 +22,14 @@ WP_DEFINE_LOCAL_LOG_TOPIC ("wp-module")
  * Used to load PipeWire modules within the WirePlumber process. This is
  * slightly different from other objects in that the module is not exported to
  * PipeWire, but it may create an export objects itself.
+ *
+ * \remarks When the "client-context" component is loaded, which is the case in
+ * the default daemon configuration, the module is loaded in a secondary
+ * `pw_context` that runs on its own thread, so that it is not affected by
+ * anything that blocks WirePlumber's main loop. The WpImplModule itself stays
+ * on the thread that created it and its API is unchanged; the module's own
+ * callbacks, though, run on that other thread. If the component is not loaded,
+ * the module is loaded in the core's `pw_context` instead.
  */
 
 struct _WpImplModule
@@ -32,9 +41,31 @@ struct _WpImplModule
   gchar *args;
   WpProperties *props; /* only used during module load */
 
+  /* the context that hosts the module; when this is set, the module lives on
+     another thread, where it is also loaded and destroyed, and every other
+     access to pw_impl_module below must be done with the client context
+     locked. It is NULL when the client-context component is not loaded, in
+     which case the module is hosted by the core's own pw_context, on this
+     thread, and no locking is needed */
+  WpClientContext *ctx;
+
   struct pw_impl_module *pw_impl_module;
   struct spa_hook impl_module_listener;
 };
+
+static inline void
+wp_impl_module_lock (WpImplModule * self)
+{
+  if (self->ctx)
+    wp_client_context_lock (self->ctx);
+}
+
+static inline void
+wp_impl_module_unlock (WpImplModule * self)
+{
+  if (self->ctx)
+    wp_client_context_unlock (self->ctx);
+}
 
 G_DEFINE_TYPE (WpImplModule, wp_impl_module, G_TYPE_OBJECT);
 
@@ -45,7 +76,10 @@ enum {
   PROP_ARGUMENTS,
   PROP_PROPERTIES,
   PROP_PW_IMPL_MODULE,
+  N_PROPS,
 };
+
+static GParamSpec *properties[N_PROPS] = { NULL, };
 
 static void impl_module_free (void *data)
 {
@@ -57,6 +91,53 @@ static const struct pw_impl_module_events impl_module_events = {
   PW_VERSION_IMPL_MODULE_EVENTS,
   .free = impl_module_free,
 };
+
+/* runs \a func on the thread of the context that hosts the module; loading
+   and destroying the module must happen there, because the module's own code
+   may do a blocking invoke on the context's loop, which would release the lock
+   and let the loop thread run the module's callbacks concurrently */
+static void
+wp_impl_module_run_in_context (WpImplModule * self,
+    WpClientContextInvokeFunc func, gpointer data)
+{
+  if (self->ctx)
+    wp_client_context_invoke_sync (self->ctx, func, data);
+  else
+    func (data);
+}
+
+struct load_data {
+  WpImplModule *self;
+  struct pw_context *context;
+  struct pw_properties *props;
+};
+
+static void
+do_load (gpointer data)
+{
+  struct load_data *d = data;
+  WpImplModule *self = d->self;
+
+  self->pw_impl_module =
+    pw_context_load_module (d->context, self->name, self->args, d->props);
+
+  if (self->pw_impl_module) {
+    pw_impl_module_add_listener (self->pw_impl_module,
+        &self->impl_module_listener, &impl_module_events, self);
+  }
+}
+
+static void
+do_unload (gpointer data)
+{
+  WpImplModule *self = data;
+
+  /* pw_impl_module_destroy() triggers the module's "free" event, which is
+     handled by impl_module_free() and resets self->pw_impl_module to NULL,
+     making this idempotent */
+  if (self->pw_impl_module)
+    pw_impl_module_destroy (self->pw_impl_module);
+}
 
 static void
 wp_impl_module_init (WpImplModule * self)
@@ -72,9 +153,17 @@ static void
 wp_impl_module_constructed (GObject * object)
 {
   WpImplModule *self = WP_IMPL_MODULE (object);
-  WpCore *core = g_weak_ref_get (&self->core);
-  struct pw_context *context = core ? wp_core_get_pw_context (core) : NULL;
-  struct pw_properties *props = NULL;
+  g_autoptr (WpCore) core = g_weak_ref_get (&self->core);
+  struct pw_context *context = NULL;
+  struct load_data d = { .self = self };
+
+  /* prefer the client context, so that the module runs on its own thread and
+     is not delayed by whatever WirePlumber's main loop happens to be doing */
+  self->ctx = core ? wp_client_context_find (core) : NULL;
+  if (self->ctx)
+    context = wp_client_context_get_pw_context (self->ctx);
+  else if (core)
+    context = wp_core_get_pw_context (core);
 
   if (!core || !context) {
     g_warning ("Tried to load module on unconnected core");
@@ -86,21 +175,23 @@ wp_impl_module_constructed (GObject * object)
     return;
   }
 
+  d.context = context;
   if (self->props)
-    props = wp_properties_to_pw_properties (self->props);
+    d.props = wp_properties_to_pw_properties (self->props);
 
-  self->pw_impl_module =
-    pw_context_load_module (context, self->name, self->args, props);
+  wp_impl_module_run_in_context (self, do_load, &d);
 
   if (self->pw_impl_module) {
+    /* the caller loses the isolation the client context provides if it is not
+       loaded yet, so make it visible which context ended up hosting this */
+    wp_debug_object (self, "loaded '%s' in the %s context", self->name,
+        self->ctx ? "client" : "manager");
+
     if (self->props) {
       /* With the module loaded, properties are just passthrough now */
       wp_properties_unref (self->props);
       self->props = NULL;
     }
-
-    pw_impl_module_add_listener (self->pw_impl_module,
-        &self->impl_module_listener, &impl_module_events, self);
   }
 
   G_OBJECT_CLASS (wp_impl_module_parent_class)->constructed (object);
@@ -113,8 +204,9 @@ wp_impl_module_finalize (GObject * object)
 
   g_weak_ref_clear (&self->core);
 
-  if (self->pw_impl_module)
-    pw_impl_module_destroy (self->pw_impl_module);
+  wp_impl_module_unload (self);
+
+  g_clear_object (&self->ctx);
 
   g_free (self->name);
   g_free (self->args);
@@ -145,22 +237,27 @@ wp_impl_module_get_property (GObject * object, guint prop_id,
       break;
 
     case PROP_PROPERTIES:
+      wp_impl_module_lock (self);
       if (self->pw_impl_module) {
         const struct pw_properties *props =
           pw_impl_module_get_properties (self->pw_impl_module);
 
         /* Should we just wrap instead of copying? */
         if (props)
-          g_value_set_boxed (value, wp_properties_new_copy (props));
+          g_value_take_boxed (value, wp_properties_new_copy (props));
         else
           g_value_set_boxed (value, NULL);
+        wp_impl_module_unlock (self);
       } else {
+        wp_impl_module_unlock (self);
         g_value_set_boxed (value, self->props);
       }
       break;
 
     case PROP_PW_IMPL_MODULE:
+      wp_impl_module_lock (self);
       g_value_set_pointer (value, self->pw_impl_module);
+      wp_impl_module_unlock (self);
       break;
 
     default:
@@ -194,10 +291,13 @@ wp_impl_module_set_property (GObject * object, guint prop_id,
     case PROP_PROPERTIES:
       props = g_value_get_boxed (value);
 
+      wp_impl_module_lock (self);
       if (props && self->pw_impl_module) {
         pw_impl_module_update_properties (self->pw_impl_module,
             wp_properties_peek_dict (props));
+        wp_impl_module_unlock (self);
       } else {
+        wp_impl_module_unlock (self);
         if (props)
           self->props = wp_properties_ref (props);
         else
@@ -221,29 +321,26 @@ wp_impl_module_class_init (WpImplModuleClass * klass)
   gobject_class->get_property = wp_impl_module_get_property;
   gobject_class->set_property = wp_impl_module_set_property;
 
-  g_object_class_install_property (gobject_class, PROP_CORE,
-      g_param_spec_pointer ("core", "Core", "The WirePlumber core",
-        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_CORE] = g_param_spec_pointer ("core", "Core", "The WirePlumber core",
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (gobject_class, PROP_NAME,
-      g_param_spec_string ("name", "Name", "The name of the PipeWire module",
-        NULL,
-        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_NAME] = g_param_spec_string ("name", "Name", "The name of the PipeWire module",
+      NULL,
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (gobject_class, PROP_ARGUMENTS,
-      g_param_spec_string ("arguments", "Arguments",
-        "The arguments to provide to the module while loading", NULL,
-        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_ARGUMENTS] = g_param_spec_string ("arguments", "Arguments",
+      "The arguments to provide to the module while loading", NULL,
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (gobject_class, PROP_PROPERTIES,
-      g_param_spec_boxed ("properties", "Properties",
-        "Properties of the module", WP_TYPE_PROPERTIES,
-        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PROPERTIES] = g_param_spec_boxed ("properties", "Properties",
+      "Properties of the module", WP_TYPE_PROPERTIES,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (gobject_class, PROP_PW_IMPL_MODULE,
-      g_param_spec_pointer ("pw-impl-module", "Underlying pw_impl_module",
-        "Pointer to the underlying pw_impl_module structure for the module",
-        G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PW_IMPL_MODULE] = g_param_spec_pointer ("pw-impl-module", "Underlying pw_impl_module",
+      "Pointer to the underlying pw_impl_module structure for the module",
+      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+  g_object_class_install_properties (gobject_class, N_PROPS, properties);
 }
 
 /*!
@@ -263,6 +360,8 @@ WpImplModule *
 wp_impl_module_load (WpCore * core, const gchar * name,
     const gchar * arguments, WpProperties * properties)
 {
+  gboolean loaded;
+
   WpImplModule *module = WP_IMPL_MODULE (
       g_object_new (WP_TYPE_IMPL_MODULE,
         "core", core,
@@ -272,11 +371,39 @@ wp_impl_module_load (WpCore * core, const gchar * name,
         NULL)
       );
 
-  if (!module->pw_impl_module) {
+  wp_impl_module_lock (module);
+  loaded = (module->pw_impl_module != NULL);
+  wp_impl_module_unlock (module);
+
+  if (!loaded) {
     /* Module loading failed, free and return */
     g_object_unref (module);
     return NULL;
   }
 
   return module;
+}
+
+/*!
+ * \brief Unloads the PipeWire module immediately
+ *
+ * Normally, the module is unloaded when the last reference to \a self is
+ * dropped and the object is finalized. This method allows unloading the module
+ * at a deterministic point in time, without having to rely on the object's
+ * lifetime, which is useful when the module needs to be torn down before
+ * another one that provides the same objects is loaded.
+ *
+ * It is safe to call this method multiple times; subsequent calls have no
+ * effect. The WpImplModule object itself remains valid after the call.
+ *
+ * \ingroup wpimplmodule
+ * \since 0.5.16
+ * \param self the module
+ */
+void
+wp_impl_module_unload (WpImplModule * self)
+{
+  g_return_if_fail (WP_IS_IMPL_MODULE (self));
+
+  wp_impl_module_run_in_context (self, do_unload, self);
 }

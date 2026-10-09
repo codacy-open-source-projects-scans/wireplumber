@@ -69,6 +69,26 @@ The main types of components are:
     to load custom protocol extensions or to offload some functionality from
     the PipeWire daemon.
 
+    Modules of this type are loaded in WirePlumber's main ``pw_context``, the
+    one that its session management logic runs on. That is what protocol
+    extensions and object factories need, since WirePlumber itself uses them
+    from that context.
+
+  * **pw-module-client**
+
+    A PipeWire module, like above, but loaded in the *client context*: a
+    secondary ``pw_context`` that runs on its own thread (see
+    ``support.client-context`` in :ref:`config_features`).
+
+    This is the right type for modules that process media, such as
+    ``libpipewire-module-loopback``, ``libpipewire-module-filter-chain`` and
+    ``libpipewire-module-combine-stream``. WirePlumber's main loop also
+    dispatches event hooks, which may in some cases take a long time to return
+    execution, long enough to interfere with delivering commands to the exported
+    objects, which in turn may cause audio issues like lost periods.
+
+    Unlike **pw-module**, a component of this type can be unloaded.
+
   * **virtual**
 
     Virtual components are just load targets that can be used to pull in
@@ -160,6 +180,82 @@ both required and optional.
 
      In essence, all optional features are opt-in by default. To opt out,
      you need to mark the feature as *disabled*.
+
+.. _config_shipped_profiles:
+
+Shipped profiles
+----------------
+
+The configuration file that ships with WirePlumber defines the following
+profiles. The profile to load is selected with the ``--profile`` command line
+option (see :ref:`wireplumber(1) <man_wireplumber>`) or permanently through
+``context.properties``; the ``profile.conf`` example fragment shows how (see
+:ref:`config_example_fragments`).
+
+.. describe:: main
+
+   The default profile. Brings up audio, Bluetooth and video capture hardware
+   together with the standard policy, and enables the settings and dynamic
+   objects metadata.
+
+.. describe:: main-systemwide
+
+   The same as ``main``, but with the features that only make sense in a user
+   session disabled: D-Bus device reservation, the portal permission store and
+   logind seat monitoring.
+
+   This is the profile to use when WirePlumber runs as a system service rather
+   than a user service.
+
+.. describe:: main-embedded
+
+   The same as ``main-systemwide``, and additionally does not store or restore
+   any runtime state — device profiles, routes, default node selection and
+   stream properties are not remembered.
+
+   This is intended for embedded systems that should always boot into a known
+   default state rather than remembering the user's runtime changes.
+
+.. describe:: video-only
+
+   The same as ``main``, but with audio and Bluetooth hardware disabled.
+   Useful for camera and screen sharing use cases where no audio management is
+   wanted.
+
+The following profiles exist for splitting WirePlumber into several instances,
+each handling one part of the job. See :ref:`daemon_multi_instance`.
+
+.. describe:: policy
+
+   The session management policy only, without any hardware monitors.
+
+.. describe:: audio
+
+   Audio hardware monitors only.
+
+.. describe:: bluetooth
+
+   Bluetooth hardware monitors only.
+
+.. describe:: video-capture
+
+   Video capture hardware monitors only.
+
+Finally, the configuration defines blocks that are not usable as profiles on
+their own, but are meant to be inherited by the profiles above:
+
+.. describe:: base
+
+   The bare minimum that every instance should have: the settings support,
+   runtime log level changes and the session services announcement.
+
+.. describe:: mixin.systemwide-session
+
+   Disables the features that are meant only for user sessions.
+
+.. describe:: mixin.stateless
+
+   Disables storing and restoring of runtime state.
 
 Dependency chain example
 ------------------------

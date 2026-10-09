@@ -23,6 +23,12 @@ node_names_table = nil
 -- SPA ids to node names: name = id_name_table[device_id][node_id]
 id_name_table = nil
 
+-- node error recovery state: recovery = device_recovery_table[device_name]
+RECOVERY_MAX_ATTEMPTS = 3
+RECOVERY_DELAY_MSEC = 1000
+-- recovery attempts are reset if the device runs this long without errors
+RECOVERY_RESET_USEC = 60 * 1000000
+device_recovery_table = {}
 
 function nonempty(str)
   return str ~= "" and str or nil
@@ -34,6 +40,72 @@ function applyDefaultDeviceProperties (properties)
   properties["api.acp.auto-port"] = false
   properties["api.dbus.ReserveDevice1.Priority"] = -20
   properties["api.alsa.split-enable"] = true
+end
+
+function isHdmiProfile (profile)
+  return profile:find("^hdmi%-") or profile:find("HDMI%d?: ")
+end
+
+function hdmiProductName (profile, properties, dev_props)
+  local name = nonempty(properties["hdmi.product.name"]) or
+      nonempty(properties["alsa.name"])
+  if isHdmiProfile(profile) and name and
+      not name:find("HDMI") and
+      name ~= nonempty(dev_props["device.description"]) and
+      name ~= properties["device.profile.description"] then
+    return name
+  end
+end
+
+function hdmiUCMChannelSuffix (profile, properties)
+  -- This makes sure channels are only added when using UCM as ACP already has them
+  if not profile:find("HDMI%d?: ") then
+    return ""
+  end
+
+  local channels = tonumber(properties["audio.channels"])
+  if not channels then
+    return ""
+  end
+
+  if channels == 1 then
+    return " (Mono)"
+  elseif channels == 2 then
+    return " (Stereo)"
+  end
+
+  -- There can be more than one subwoofer, accounting for that
+  local lfe_count = 0
+  for _ in (properties["audio.position"] or ""):gmatch("LFE") do
+    lfe_count = lfe_count + 1
+  end
+  return " (" .. (channels - lfe_count) .. "." .. lfe_count .. " Surround)"
+end
+
+function buildNodeDescription (dev_props, properties, dev, subdev,
+    profile, profile_desc)
+  local desc = nonempty(dev_props["device.description"]) or "unknown"
+  local name = nonempty(properties["api.alsa.pcm.name"]) or
+               nonempty(properties["api.alsa.pcm.id"]) or dev
+
+  if profile_desc then
+    desc = desc .. " " .. profile_desc
+
+    -- Include the product name in description if HDMI node for better UX
+    local product = hdmiProductName(profile, properties, dev_props)
+    if product then
+      desc = desc .. " [" .. product .. "]"
+    end
+    -- When using UCM, number of channels is not included, so add it
+    desc = desc .. hdmiUCMChannelSuffix(profile, properties)
+  elseif subdev ~= "0" then
+    desc = desc .. " (" .. name .. " " .. subdev .. ")"
+  elseif dev ~= "0" then
+    desc = desc .. " (" .. name .. ")"
+  end
+
+  -- also sanitize description, replace ':' with ' '
+  return (desc:gsub("(:)", " "))
 end
 
 function createSplitPCMHWNode(dev_props, properties)
@@ -178,6 +250,106 @@ split_nodes_om:connect ("object-added", function(_, node)
     end
 end)
 
+function monitorNodeError (node)
+  node:connect("state-changed", function (n, old_state, new_state)
+    if new_state == "error" and old_state ~= "error" then
+      local node_name = n:get_property ("node.name")
+      local dev_id = n:get_property ("device.id")
+      local curr_profile_index = nil
+
+      log:info ("Error received on ALSA node " .. node_name)
+
+      -- Find the device for this node
+      local device = devices_om:lookup {
+          Constraint { "bound-id", "=", dev_id, type = "gobject" }
+      }
+      if device == nil then
+        log:warning ("Could not find ALSA device for node " .. node_name)
+        return
+      end
+
+      -- Get current profile
+      local dev_name = device:get_property ("device.name")
+      for p in device:iterate_params ("Profile") do
+        local curr_profile = cutils.parseParam (p, "Profile")
+        curr_profile_index = curr_profile.index
+        break
+      end
+      if curr_profile_index == nil then
+        log:warning ("Could not get current profile on ALSA device "
+            .. dev_name)
+        return
+      end
+
+      local recovery = device_recovery_table[dev_name]
+      if recovery == nil then
+        recovery = { attempts = 0, pending = false, last_usec = 0 }
+        device_recovery_table[dev_name] = recovery
+      end
+
+      -- Closing the device re-opens all its nodes, so make sure errors from the
+      -- other nodes of the same device are ignored if a recovery is pending.
+      if recovery.pending then
+        log:info ("Recovery already in progress on ALSA device " .. dev_name)
+        return
+      end
+
+      -- Only count errors that happen shortly after the last recovery, so that
+      -- sporadic errors on long-running devices are always recovered.
+      local now = GLib.get_monotonic_time ()
+      if recovery.attempts > 0 and
+          now - recovery.last_usec > RECOVERY_RESET_USEC then
+        log:info ("ALSA device " .. dev_name ..
+            " ran without errors since the last recovery, resetting attempts")
+        recovery.attempts = 0
+      end
+
+      if recovery.attempts >= RECOVERY_MAX_ATTEMPTS then
+        recovery.last_usec = now
+        log:warning ("ALSA device " .. dev_name .. " still failing after " ..
+            tostring (recovery.attempts) .. " recovery attempts, giving up")
+        return
+      end
+
+      recovery.attempts = recovery.attempts + 1
+      recovery.pending = true
+      recovery.last_usec = now
+
+      -- Close the ALSA device by setting the profile to Off
+      local param_off = Pod.Object {
+        "Spa:Pod:Object:Param:Profile", "Profile",
+        index = 0,
+      }
+      device:set_param ("Profile", param_off)
+      log:info ("Profile set to Off on ALSA device " .. dev_name ..
+          " (recovery attempt " .. tostring (recovery.attempts) .. ")")
+
+      -- Re-open the ALSA device by restoring the profile after a delay
+      Core.timeout_add (RECOVERY_DELAY_MSEC, function ()
+        recovery.pending = false
+
+        -- The device may have been removed or re-created in the meantime
+        local d = devices_om:lookup {
+            Constraint { "bound-id", "=", dev_id, type = "gobject" }
+        }
+        if d == nil or d:get_property ("device.name") ~= dev_name then
+          log:info ("ALSA device " .. dev_name ..
+              " is gone, not restoring its profile")
+          return
+        end
+
+        local param_curr = Pod.Object {
+          "Spa:Pod:Object:Param:Profile", "Profile",
+          index = curr_profile_index,
+        }
+        d:set_param ("Profile", param_curr)
+        log:info ("Restored profile on ALSA device " .. dev_name)
+      end)
+
+    end
+  end)
+end
+
 function createNode(parent, id, obj_type, factory, properties)
   local dev_props = parent.properties
   local parent_id = tonumber(dev_props["spa.object.id"])
@@ -269,6 +441,7 @@ function createNode(parent, id, obj_type, factory, properties)
 
   -- and a nick
   local nick = nonempty(properties["node.nick"])
+      or nonempty(properties["hdmi.product.name"])
       or nonempty(properties["api.alsa.pcm.name"])
       or nonempty(properties["alsa.name"])
       or nonempty(profile_desc)
@@ -280,21 +453,11 @@ function createNode(parent, id, obj_type, factory, properties)
   properties["node.nick"] = nick:gsub("(:)", " ")
 
   -- ensure the node has a description
+  local own_description
   if not properties["node.description"] then
-    local desc = nonempty(dev_props["device.description"]) or "unknown"
-    local name = nonempty(properties["api.alsa.pcm.name"]) or
-                 nonempty(properties["api.alsa.pcm.id"]) or dev
-
-    if profile_desc then
-      desc = desc .. " " .. profile_desc
-    elseif subdev ~= "0" then
-      desc = desc .. " (" .. name .. " " .. subdev .. ")"
-    elseif dev ~= "0" then
-      desc = desc .. " (" .. name .. ")"
-    end
-
-    -- also sanitize description, replace ':' with ' '
-    properties["node.description"] = desc:gsub("(:)", " ")
+    own_description = buildNodeDescription (dev_props, properties,
+        dev, subdev, profile, profile_desc)
+    properties["node.description"] = own_description
   end
 
   -- add api.alsa.card.* and alsa.* properties for rule matching purposes
@@ -302,6 +465,12 @@ function createNode(parent, id, obj_type, factory, properties)
     if k:find("^api%.alsa%.card%..*") or k:find("^alsa%..*") then
       properties[k] = v
     end
+  end
+
+  -- add device form-factor property for rule matching purposes
+  local dev_form_factor = dev_props["device.form-factor"]
+  if dev_form_factor ~= nil then
+    properties["device.form-factor"] = dev_form_factor
   end
 
   -- add cpu.vm.name for rule matching purposes
@@ -316,6 +485,12 @@ function createNode(parent, id, obj_type, factory, properties)
     orig_properties[k] = v
   end
   properties = JsonUtils.match_rules_update_properties (config.rules, properties)
+
+  -- rules may have changed the description or what it is built from
+  if properties["node.description"] == own_description then
+    properties["node.description"] = buildNodeDescription (dev_props,
+        properties, dev, subdev, profile, profile_desc)
+  end
 
   if cutils.parseBool (properties ["node.disabled"]) then
     log:notice ("ALSA node " .. properties["node.name"] .. " disabled")
@@ -338,8 +513,17 @@ function createNode(parent, id, obj_type, factory, properties)
 
       local node = createSplitPCMHWNode(dev_props, orig_properties)
       if node ~= nil then
-        node:activate(Feature.Proxy.BOUND)
-        parent:store_managed_object(SPLIT_PCM_PARENT_OFFSET + id, node)
+        parent:set_managed_pending(SPLIT_PCM_PARENT_OFFSET + id)
+        node:activate(Features.ALL, function (n, err)
+          if err then
+            log:warning ("Failed to create ALSA SplitPCM HW node " ..
+                split_hw_node_name .. ": " .. tostring(err))
+            parent:store_managed_object(SPLIT_PCM_PARENT_OFFSET + id, nil)
+          else
+            monitorNodeError (n)
+            parent:store_managed_object(SPLIT_PCM_PARENT_OFFSET + id, n)
+          end
+        end)
 
         node_names_table[split_hw_node_name] = true
         id_name_table[parent_id][SPLIT_PCM_PARENT_OFFSET + id] = split_hw_node_name
@@ -358,12 +542,15 @@ function createNode(parent, id, obj_type, factory, properties)
   -- create the node
   local node = Node("adapter", properties)
   parent:set_managed_pending(id)
-  node:activate(Feature.Proxy.BOUND, function (_, err)
+  node:activate(Features.ALL, function (n, err)
       if err then
-        log:warning ("Failed to create " .. properties ["node.name"]
-          .. ": " .. tostring(err))
+        log:warning ("Failed to create ALSA node " ..
+            tostring (properties["node.name"]) .. ": " .. tostring(err))
+        parent:store_managed_object(id, nil)
+      else
+        monitorNodeError (n)
+        parent:store_managed_object(id, n)
       end
-      parent:store_managed_object(id, node)
   end)
 end
 
@@ -391,8 +578,16 @@ function createDevice(parent, id, factory, properties)
   if device then
     device:connect("create-object", createNode)
     device:connect("object-removed", removeNode)
-    device:activate(Feature.SpaDevice.ENABLED | Feature.Proxy.BOUND)
-    parent:store_managed_object(id, device)
+    parent:set_managed_pending(id)
+    device:activate(Features.ALL, function (d, err)
+      if err then
+        log:warning ("Failed to create ALSA device " ..
+            tostring (properties["device.name"]) .. ": " .. tostring(err))
+        parent:store_managed_object(id, nil)
+      else
+        parent:store_managed_object(id, device)
+      end
+    end)
   else
     log:warning ("Failed to create '" .. factory .. "' device")
   end
@@ -569,13 +764,16 @@ function createMonitor ()
         rd_plugin:call("destroy-reservation", rd_name)
       end
     end
-    device_names_table[device.properties["device.name"]] = nil
+    local device_name = device.properties["device.name"]
+    device_names_table[device_name] = nil
+    device_recovery_table[device_name] = nil
   end)
 
   -- reset the name tables to make sure names are recycled
   device_names_table = {}
   node_names_table = {}
   id_name_table = {}
+  device_recovery_table = {}
 
   -- activate monitor
   log:info("Activating ALSA monitor")

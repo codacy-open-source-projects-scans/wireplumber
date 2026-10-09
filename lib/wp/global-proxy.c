@@ -35,6 +35,10 @@ WP_DEFINE_LOCAL_LOG_TOPIC ("wp-global-proxy")
  *
  * \gproperty{permissions, guint, G_PARAM_READABLE,
  *   The pipewire global permissions}
+ *
+ * \gproperty{own-global, gboolean,
+ *   G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY,
+ *   Whether to claim the registry global that this proxy binds to}
  */
 
 typedef struct _WpGlobalProxyPrivate WpGlobalProxyPrivate;
@@ -43,6 +47,7 @@ struct _WpGlobalProxyPrivate
   WpGlobal *global;
   gchar factory_name[96];
   WpProperties *properties;
+  gboolean own_global;
 };
 
 enum {
@@ -51,13 +56,19 @@ enum {
   PROP_FACTORY_NAME,
   PROP_GLOBAL_PROPERTIES,
   PROP_PERMISSIONS,
+  PROP_OWN_GLOBAL,
+  N_PROPS,
 };
+
+static GParamSpec *properties[N_PROPS] = { NULL, };
 
 G_DEFINE_TYPE_WITH_PRIVATE (WpGlobalProxy, wp_global_proxy, WP_TYPE_PROXY)
 
 static void
 wp_global_proxy_init (WpGlobalProxy * self)
 {
+  WpGlobalProxyPrivate *priv = wp_global_proxy_get_instance_private (self);
+  priv->own_global = TRUE;
 }
 
 static void
@@ -69,6 +80,12 @@ wp_global_proxy_dispose (GObject * object)
 
   if (priv->global)
     wp_global_rm_flag (priv->global, WP_GLOBAL_FLAG_OWNED_BY_PROXY);
+
+  if (!priv->own_global) {
+    g_autoptr (WpCore) core = wp_object_get_core (WP_OBJECT (self));
+    if (core)
+      wp_registry_rm_owned_proxy (wp_core_get_registry (core), self);
+  }
 
   G_OBJECT_CLASS (wp_global_proxy_parent_class)->dispose (object);
 }
@@ -105,6 +122,9 @@ wp_global_proxy_set_property (GObject * object, guint property_id,
     break;
   case PROP_GLOBAL_PROPERTIES:
     priv->properties = g_value_dup_boxed (value);
+    break;
+  case PROP_OWN_GLOBAL:
+    priv->own_global = g_value_get_boolean (value);
     break;
   default:
     G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -234,6 +254,12 @@ wp_global_proxy_bound (WpProxy * proxy, guint32 global_id)
       wp_global_proxy_get_instance_private (self);
   g_autoptr (WpCore) core = wp_object_get_core (WP_OBJECT (self));
 
+  if (!priv->own_global) {
+    if (core)
+      wp_registry_add_owned_proxy (wp_core_get_registry (core), self);
+    return;
+  }
+
   if (!priv->global) {
     wp_registry_prepare_new_global (wp_core_get_registry (core),
         global_id, PW_PERM_ALL, WP_GLOBAL_FLAG_OWNED_BY_PROXY,
@@ -249,6 +275,12 @@ wp_global_proxy_destroyed (WpProxy * proxy)
   WpGlobalProxy *self = WP_GLOBAL_PROXY (proxy);
   WpGlobalProxyPrivate *priv =
       wp_global_proxy_get_instance_private (self);
+
+  if (!priv->own_global) {
+    g_autoptr (WpCore) core = wp_object_get_core (WP_OBJECT (self));
+    if (core)
+      wp_registry_rm_owned_proxy (wp_core_get_registry (core), self);
+  }
 
   if (priv->global && priv->global->proxy &&
       (priv->global->flags & WP_GLOBAL_FLAG_OWNED_BY_PROXY)) {
@@ -289,25 +321,27 @@ wp_global_proxy_class_init (WpGlobalProxyClass * klass)
   proxy_class->bound = wp_global_proxy_bound;
   proxy_class->pw_proxy_destroyed = wp_global_proxy_destroyed;
 
-  g_object_class_install_property (object_class, PROP_GLOBAL,
-      g_param_spec_boxed ("global", "global", "Internal WpGlobal object",
-          wp_global_get_type (),
-          G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_GLOBAL] = g_param_spec_boxed ("global", "global", "Internal WpGlobal object",
+      wp_global_get_type (),
+      G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_FACTORY_NAME,
-      g_param_spec_string ("factory-name", "factory-name",
-          "The factory name", "",
-          G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_FACTORY_NAME] = g_param_spec_string ("factory-name", "factory-name",
+      "The factory name", "",
+      G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_GLOBAL_PROPERTIES,
-      g_param_spec_boxed ("global-properties", "global-properties",
-          "The pipewire global properties", WP_TYPE_PROPERTIES,
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_GLOBAL_PROPERTIES] = g_param_spec_boxed ("global-properties", "global-properties",
+      "The pipewire global properties", WP_TYPE_PROPERTIES,
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_PERMISSIONS,
-      g_param_spec_uint ("permissions", "permissions",
-          "The pipewire global permissions", 0, G_MAXUINT, 0,
-          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PERMISSIONS] = g_param_spec_uint ("permissions", "permissions",
+      "The pipewire global permissions", 0, G_MAXUINT, 0,
+      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+  properties[PROP_OWN_GLOBAL] = g_param_spec_boolean ("own-global", "own-global",
+      "Whether to claim the registry global that this proxy binds to", TRUE,
+      G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
+
+  g_object_class_install_properties (object_class, N_PROPS, properties);
 }
 
 /*!

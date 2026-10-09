@@ -128,6 +128,23 @@ assert (val[2].offset == 20 and val[2].typename == "Properties" and val[2].value
 assert (val[3].offset == 40 and val[3].typename == "Properties" and val[3].value == 4)
 assert (pod:get_type_name() == "Spa:Pod:Sequence")
 
+-- Sequence with pod values
+local props = Pod.Object { "Spa:Pod:Object:Param:Props", "Props", volume = 0.5 }
+pod = Pod.Sequence {
+  {offset = 0, typename = "Properties", value = props},
+  {offset = 4800, typename = "Properties", value = Pod.Float (1.0)},
+}
+-- the sequence must not steal the caller's reference to the value pods
+assert (props:get_type_name() == "Spa:Pod:Object:Param:Props")
+val = pod:parse()
+assert (val.pod_type == "Sequence")
+assert (val[1].offset == 0 and val[1].typename == "Properties")
+assert (val[1].value.pod_type == "Object")
+assert (val[1].value.properties.volume == 0.5)
+assert (val[2].offset == 4800 and val[2].typename == "Properties")
+assert (val[2].value == 1.0)
+assert (props:parse().properties.volume == 0.5)
+
 -- Array
 pod = Pod.Array { "Spa:Bool", true, false, false, true }
 val = pod:parse()
@@ -175,6 +192,21 @@ assert (val[1] == 3)
 assert (val[2] == 3)
 assert (val[3] == 4)
 assert (pod:get_type_name() == "Spa:Pod:Choice")
+pod = Pod.Choice.Enum { "Spa:Bool", true, true, false }
+val = pod:parse()
+assert (val.pod_type == "Choice.Enum")
+assert (val.value_type == "Spa:Bool")
+assert (val[1])
+assert (val[2])
+assert (not val[3])
+assert (pod:get_type_name() == "Spa:Pod:Choice")
+pod = Pod.Choice.Enum { "Spa:Bool", false, false, true }
+val = pod:parse()
+assert (val.pod_type == "Choice.Enum")
+assert (val.value_type == "Spa:Bool")
+assert (not val[1])
+assert (not val[2])
+assert (val[3])
 pod = Pod.Choice.Flags { "Spa:Int", 1 << 0, 1 << 2, 1 << 3}
 val = pod:parse()
 assert (val.pod_type == "Choice.Flags")

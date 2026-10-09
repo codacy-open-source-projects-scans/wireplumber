@@ -330,7 +330,7 @@ function getLinkedBluetoothLoopbackSourceNodeForStream (stream, node_om, link_om
         visited_link_groups [filter_link_group] = true
       end
       for filter_stream_node in node_om:iterate {
-          Constraint { "media.class", "matches", "Stream/Input/Audio", type = "pw-global" },
+          Constraint { "bound-id", "!", peer_id, type = "gobject" },
           Constraint { "stream.monitor", "!", "true", type = "pw" },
           Constraint { "bluez5.loopback", "!", "true", type = "pw" },
           Constraint { "node.link-group", "=", filter_link_group, type = "pw" }
@@ -469,8 +469,11 @@ local link_added_hook = SimpleEventHook {
     local node_om = source:call ("get-object-manager", "node")
     local link = event:get_subject ()
     local in_stream_id = link.properties["link.input.node"]
+    local out_node_id = link.properties["link.output.node"]
 
-    -- Only evaluate bluetooth profiles if a capture stream was linked
+    -- Only evaluate bluetooth profiles if a capture stream was linked, or if
+    -- the BT loopback source node was linked to anything (e.g. a filter chain
+    -- that gets linked after the capture stream was linked to the filter)
     local stream = node_om:lookup {
       Constraint { "media.class", "matches", "Stream/Input/Audio", type = "pw-global" },
       Constraint { "node.link-group", "-", type = "pw" },
@@ -478,7 +481,12 @@ local link_added_hook = SimpleEventHook {
       Constraint { "bluez5.loopback", "!", "true", type = "pw" },
       Constraint { "bound-id", "=", in_stream_id, type = "gobject" },
     }
-    if stream ~= nil then
+    local bt_node = node_om:lookup {
+      Constraint { "media.class", "matches", "Audio/Source", type = "pw-global" },
+      Constraint { "bluez5.loopback", "=", "true", type = "pw" },
+      Constraint { "bound-id", "=", out_node_id, type = "gobject" },
+    }
+    if stream ~= nil or bt_node ~= nil then
       capture_stream_links [link.id] = true
       source:call ("push-event", "evaluate-bluetooth-profiles", nil, nil)
     end
@@ -558,6 +566,18 @@ local device_profile_changed_hook = SimpleEventHook {
   },
   execute = function (event)
     local device = event:get_subject ()
+    -- the timers are keyed by the loopback node's "device.id" property, which
+    -- is a string; device["bound-id"] is the same value as a number
+    local dev_id = tostring (device["bound-id"])
+
+    local function cancel_timer (tbl)
+      if tbl[dev_id] == nil then
+        return false
+      end
+      tbl[dev_id]:destroy ()
+      tbl[dev_id] = nil
+      return true
+    end
 
     -- Always save the current profile when it changes
     local cur_profile = getCurrentProfile (device)
@@ -565,9 +585,17 @@ local device_profile_changed_hook = SimpleEventHook {
       if isHeadsetProfile (device, cur_profile) then
         log:info (device, "Saving headset profile " .. cur_profile.name)
         saveHeadsetProfile (device, cur_profile.name, cur_profile.save)
+        -- Explicit headset (pactl/settings) must not be reverted by a
+        -- restore timer armed when the previous capture stream closed.
+        if cancel_timer (restore_timeout_source) then
+          log:info (device, "Cancelled profile restore on device " .. dev_id)
+        end
       else
         log:info (device, "Saving non-headset profile " .. cur_profile.name)
         saveNonHeadsetProfile (device, cur_profile.name)
+        if cancel_timer (switch_timeout_source) then
+          log:info (device, "Cancelled profile switch on device " .. dev_id)
+        end
       end
     end
   end

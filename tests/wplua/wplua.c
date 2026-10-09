@@ -19,7 +19,10 @@ enum {
   PROP_TEST_FLOAT,
   PROP_TEST_DOUBLE,
   PROP_TEST_BOOLEAN,
+  N_PROPS,
 };
+
+static GParamSpec *properties[N_PROPS] = { NULL, };
 
 typedef struct _TestObject TestObject;
 struct _TestObject
@@ -164,43 +167,37 @@ test_object_class_init (TestObjectClass * klass)
   obj_class->get_property = test_object_get_property;
   obj_class->set_property = test_object_set_property;
 
-  g_object_class_install_property (obj_class, PROP_TEST_STRING,
-      g_param_spec_string ("test-string", "test-string", "blurb", NULL,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_STRING] = g_param_spec_string ("test-string", "test-string", "blurb", NULL,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_INT,
-      g_param_spec_int ("test-int", "test-int", "blurb",
-          G_MININT, G_MAXINT, 0,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_INT] = g_param_spec_int ("test-int", "test-int", "blurb",
+      G_MININT, G_MAXINT, 0,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_UINT,
-      g_param_spec_uint ("test-uint", "test-uint", "blurb",
-          0, G_MAXUINT, 0,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_UINT] = g_param_spec_uint ("test-uint", "test-uint", "blurb",
+      0, G_MAXUINT, 0,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_INT64,
-      g_param_spec_int64 ("test-int64", "test-int64", "blurb",
-          G_MININT64, G_MAXINT64, 0,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_INT64] = g_param_spec_int64 ("test-int64", "test-int64", "blurb",
+      G_MININT64, G_MAXINT64, 0,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_UINT64,
-      g_param_spec_uint64 ("test-uint64", "test-uint64", "blurb",
-          0, G_MAXUINT64, 0,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_UINT64] = g_param_spec_uint64 ("test-uint64", "test-uint64", "blurb",
+      0, G_MAXUINT64, 0,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_FLOAT,
-      g_param_spec_float ("test-float", "test-float", "blurb",
-          -20.0f, 20.0f, 0,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_FLOAT] = g_param_spec_float ("test-float", "test-float", "blurb",
+      -20.0f, 20.0f, 0,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_DOUBLE,
-      g_param_spec_double ("test-double", "test-double", "blurb",
-          -20.0, 20.0, 0.0,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_DOUBLE] = g_param_spec_double ("test-double", "test-double", "blurb",
+      -20.0, 20.0, 0.0,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (obj_class, PROP_TEST_BOOLEAN,
-      g_param_spec_boolean ("test-boolean", "test-boolean", "blurb", FALSE,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  properties[PROP_TEST_BOOLEAN] = g_param_spec_boolean ("test-boolean", "test-boolean", "blurb", FALSE,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+  g_object_class_install_properties (obj_class, N_PROPS, properties);
 
   g_signal_new ("change", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_ACTION | G_SIGNAL_RUN_LAST,
@@ -260,8 +257,8 @@ test_load_and_call (lua_State * L, const gchar *buf, gsize size,
 static void
 test_wplua_basic ()
 {
-  lua_State *L = wplua_new ();
-  wplua_unref (L);
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  g_assert_nonnull (lua_state);
 }
 
 static void
@@ -269,7 +266,8 @@ test_wplua_construct ()
 {
   g_autoptr (GObject) obj = NULL;
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   wplua_register_type_methods(L, TEST_TYPE_OBJECT,
       l_test_object_new, l_test_object_methods);
@@ -287,7 +285,7 @@ test_wplua_construct ()
   g_object_ref (obj);
   g_assert_cmpint (obj->ref_count, ==, 2);
 
-  wplua_unref (L);
+  g_clear_object (&lua_state);
   g_assert_cmpint (obj->ref_count, ==, 1);
 }
 
@@ -296,7 +294,8 @@ test_wplua_properties ()
 {
   TestObject *obj = NULL;
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   wplua_register_type_methods(L, TEST_TYPE_OBJECT,
       l_test_object_new, l_test_object_methods);
@@ -339,8 +338,6 @@ test_wplua_properties ()
     "assert (o['test-boolean'] == true)\n";
   test_load_and_call (L, code2, sizeof (code2) - 1, 0, 0, &error);
   g_assert_no_error (error);
-
-  wplua_unref (L);
 }
 
 static void
@@ -348,7 +345,8 @@ test_wplua_closure ()
 {
   GClosure *closure;
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   lua_pushstring (L, "some string");
   lua_setglobal (L, "expected_str");
@@ -380,7 +378,7 @@ test_wplua_closure ()
   g_assert_true (lua_isboolean (L, -1));
   g_assert_true (lua_toboolean (L, -1));
 
-  wplua_unref (L);
+  g_clear_object (&lua_state);
 
   g_assert_true (closure->is_invalid);
   g_closure_unref (closure);
@@ -390,7 +388,8 @@ static void
 test_wplua_signals ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   wplua_register_type_methods(L, TEST_TYPE_OBJECT,
       l_test_object_new, l_test_object_methods);
@@ -419,14 +418,14 @@ test_wplua_signals ()
     "assert(o['test-boolean'] == false)\n";
   test_load_and_call (L, code, sizeof (code) - 1, 0, 0, &error);
   g_assert_no_error (error);
-  wplua_unref (L);
 }
 
 static void
 test_wplua_sandbox_script ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   wplua_register_type_methods(L, TEST_TYPE_OBJECT,
       l_test_object_new, l_test_object_methods);
@@ -479,15 +478,14 @@ test_wplua_sandbox_script ()
   g_debug ("expected error: %s", error ? error->message : "null");
   g_assert_error (error, WP_DOMAIN_LUA, WP_LUA_ERROR_RUNTIME);
   g_clear_error (&error);
-
-  wplua_unref (L);
 }
 
 static void
 test_wplua_sandbox_config ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   wplua_enable_sandbox (L, 0);
 
@@ -517,15 +515,14 @@ test_wplua_sandbox_config ()
     "assert = 'hello world'\n";
   test_load_and_call (L, code7, sizeof (code7) - 1, 0, 0, &error);
   g_assert_no_error (error);
-
-  wplua_unref (L);
 }
 
 static void
 test_wplua_convert_asv ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   g_autoptr (GVariant) v = g_variant_new_parsed ("@a{sv} { "
       "'test-int': <42>, "
@@ -573,15 +570,14 @@ test_wplua_convert_asv ()
   test_str = NULL;
   g_assert_true (g_variant_lookup (nested, "string", "&s", &test_str));
   g_assert_cmpstr (test_str, ==, "baz");
-
-  wplua_unref (L);
 }
 
 static void
 test_wplua_convert_gvariant_array ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   g_autoptr (GVariant) v = g_variant_new_parsed ("@av [ "
       "<42>, <3.14>, <'foobar'>, <true>, "
@@ -625,14 +621,13 @@ test_wplua_convert_gvariant_array ()
   test_str = NULL;
   g_assert_true (g_variant_lookup (nested, "string", "&s", &test_str));
   g_assert_cmpstr (test_str, ==, "baz");
-
-  wplua_unref (L);
 }
 static void
 test_wplua_convert_wp_properties ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   const gchar code[] =
     "props = { "
@@ -663,15 +658,14 @@ test_wplua_convert_wp_properties ()
     "assert (fromc['test-boolean'] == 'false')\n";
   test_load_and_call (L, code2, sizeof (code2) - 1, 0, 0, &error);
   g_assert_no_error (error);
-
-  wplua_unref (L);
 }
 
 static void
 test_wplua_script_arguments ()
 {
   g_autoptr (GError) error = NULL;
-  lua_State *L = wplua_new ();
+  g_autoptr (WpLuaState) lua_state = wplua_state_new ();
+  lua_State *L = wplua_state_get (lua_state);
 
   g_autoptr (GVariant) v = g_variant_new_parsed ("@a{sv} { "
       "'test-int': <42>, "
@@ -697,8 +691,6 @@ test_wplua_script_arguments ()
   wplua_gvariant_to_lua (L, v);
   test_load_and_call (L, code2, sizeof (code2) - 1, 1, 0, &error);
   g_assert_no_error (error);
-
-  wplua_unref (L);
 }
 
 gint

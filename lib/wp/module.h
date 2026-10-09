@@ -30,6 +30,9 @@ WP_API
 WpImplModule * wp_impl_module_load (WpCore * core, const gchar * name,
     const gchar * arguments, WpProperties * properties);
 
+WP_API
+void wp_impl_module_unload (WpImplModule * self);
+
 G_END_DECLS
 
 #endif /* __WIREPLUMBER_MODULE_H__ */

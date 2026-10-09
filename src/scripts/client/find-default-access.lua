@@ -29,6 +29,7 @@ SimpleEventHook {
   execute = function (event)
     local client = event:get_subject ()
     local app_name = client:get_property ("application.name")
+    local access = cutils.get_client_access (client.properties)
 
     local permission_manager = event:get_data ("permission-manager")
     local effective_access = event:get_data ("effective-access")
@@ -37,7 +38,6 @@ SimpleEventHook {
 
     -- Check effective access if never set before
     if effective_access == nil then
-      local access = cutils.get_client_access (client.properties)
       if access ~= nil then
         log:info (client, string.format (
             "Found default %s effective-access for client '%s'", access, app_name))
@@ -59,3 +59,18 @@ SimpleEventHook {
     end
   end
 }:register()
+
+-- Activate the permission managers now rather than when the first client
+-- connects, so that their permissions are already computed by then
+for pm_name, pm in pairs ({
+  ["default"] = default_pm,
+  ["default-restricted"] = default_restricted_pm,
+}) do
+  pm:activate (Features.ALL, function (_, e)
+    if e then
+      log:warning (string.format (
+          "failed to activate the '%s' permission manager: %s",
+          pm_name, tostring (e)))
+    end
+  end)
+end

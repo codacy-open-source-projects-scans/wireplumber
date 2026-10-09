@@ -286,7 +286,7 @@ static const struct {
 
 /* map glib's log levels, which are flags in the range (1<<2) to (1<<8),
   to the 1-7 range; first calculate the integer part of log2(log_level)
-  to bring it down to 2-8 and substract 1 */
+  to bring it down to 2-8 and subtract 1 */
 static G_GNUC_CONST inline gint
 level_index_from_flags (GLogLevelFlags log_level)
 {
@@ -297,7 +297,7 @@ level_index_from_flags (GLogLevelFlags log_level)
 }
 
 /* map an index in the log_level_info table to a single GLogLevelFlags flag */
-static G_GNUC_CONST inline GLogLevelFlags
+static G_GNUC_PURE inline GLogLevelFlags
 level_index_to_flag (gint lvl_index)
 {
   if (lvl_index < 0 || lvl_index >= (gint) G_N_ELEMENTS (log_level_info))
@@ -307,7 +307,7 @@ level_index_to_flag (gint lvl_index)
 
 /* map an index in the log_level_info table to an OR combination of all the
    GLogLevelFlags that are enabled at this level */
-static G_GNUC_CONST inline GLogLevelFlags
+static G_GNUC_PURE inline GLogLevelFlags
 level_index_to_full_flags (gint lvl_index)
 {
   GLogLevelFlags flags = 0;
@@ -322,7 +322,7 @@ level_index_to_full_flags (gint lvl_index)
    and index 3 (G_LOG_LEVEL_WARNING) can not be returned
    if warn_to_notice == FALSE, SPA_LOG_LEVEL_WARN maps to 3 (G_LOG_LEVEL_WARNING)
    and index 4 (G_LOG_LEVEL_MESSAGE) can not be returned */
-static G_GNUC_CONST inline gint
+static G_GNUC_PURE inline gint
 level_index_from_spa (gint spa_lvl, gboolean warn_to_notice)
 {
   if (G_UNLIKELY (spa_lvl <= SPA_LOG_LEVEL_NONE))
@@ -339,7 +339,7 @@ level_index_from_spa (gint spa_lvl, gboolean warn_to_notice)
 
 /* map an index in the log_level_info table to a SPA_LOG_LEVEL_*
    here, G_LOG_LEVEL_MESSAGE maps to SPA_LOG_LEVEL_WARN */
-static G_GNUC_CONST inline gint
+static G_GNUC_PURE inline gint
 level_index_to_spa (gint lvl_index)
 {
   if (lvl_index < 0 || lvl_index >= (gint) G_N_ELEMENTS (log_level_info))
@@ -513,6 +513,20 @@ format_pw_log_level_string (gint level, const struct log_topic_pattern *patterns
   return g_string_free (str, FALSE);
 }
 
+/*!
+ * \brief Sets the log level and the per-topic log level patterns at runtime
+ *
+ * \a level_str uses the same syntax as the WIREPLUMBER_DEBUG environment
+ * variable: a comma-separated list of `[<topic pattern>:]<level>` entries.
+ * An entry without a topic pattern sets the global log level. For example,
+ * "I,s-*:D" enables informational messages everywhere and debug messages
+ * for all script topics.
+ *
+ * \ingroup wplog
+ * \param level_str the log level string to apply
+ * \return TRUE if \a level_str was parsed and applied, FALSE if it was invalid,
+ *   in which case the previous log level remains in effect
+ */
 gboolean
 wp_log_set_level (const gchar *level_str)
 {

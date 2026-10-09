@@ -137,11 +137,11 @@ si_standard_link_get_associated_proxy (WpSessionItem * item, GType proxy_type)
 }
 
 static void
-request_destroy_link (gpointer data, gpointer user_data)
+destroy_link (gpointer data, gpointer user_data)
 {
   WpLink *link = WP_LINK (data);
 
-  wp_global_proxy_request_destroy (WP_GLOBAL_PROXY (link));
+  wp_object_deactivate (WP_OBJECT (link), WP_PROXY_FEATURE_BOUND);
 }
 
 static void
@@ -152,7 +152,7 @@ clear_node_links (GPtrArray **node_links_p)
    * objects alive. Deactivate the links now, to destroy the PW objects.
    */
   if (*node_links_p)
-    g_ptr_array_foreach (*node_links_p, request_destroy_link, NULL);
+    g_ptr_array_foreach (*node_links_p, destroy_link, NULL);
 
   g_clear_pointer (node_links_p, g_ptr_array_unref);
 }

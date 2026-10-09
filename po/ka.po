@@ -31,7 +31,7 @@ msgstr ""
 #. applies properties from config.rules when asked to
 #. set the device id and spa factory name; REQUIRED, do not change
 #. set the default pause-on-idle setting
-#. try to negotiate the max ammount of channels
+#. try to negotiate the max amount of channels
 #. set priority
 #. ensure the node has a media class
 #. ensure the node has a name
@@ -309,16 +309,6 @@ msgstr "აუდიო F32 ფორმატში გადაყვანი
 #: wireplumber.conf
 msgid "No DSP"
 msgstr "DSP-ის გარეშე"
-
-#. /wireplumber.settings.schema/node.filter.forward-format/description
-#: wireplumber.conf
-msgid "Forward format on filter nodes or not"
-msgstr "მოხდება თუ არა ფორმატის გადაგზავნა ფილტრის კვანძებზე"
-
-#. /wireplumber.settings.schema/node.filter.forward-format/name
-#: wireplumber.conf
-msgid "Forward format"
-msgstr "ფორმატის გადაგზავნა"
 
 #. /wireplumber.settings.schema/node.restore-default-targets/description
 #: wireplumber.conf

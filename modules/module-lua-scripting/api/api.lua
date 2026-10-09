@@ -234,6 +234,7 @@ SANDBOX_EXPORT = {
   Pod = WpSpaPod,
   Json = WpSpaJson,
   State = WpState_new,
+  StateMetadata = WpStateMetadata_new,
   LocalModule = WpImplModule_new,
   ImplMetadata = WpImplMetadata_new,
   Settings = WpSettings,
@@ -242,6 +243,7 @@ SANDBOX_EXPORT = {
   ProcUtils = ProcUtils,
   Properties = WpProperties_new,
   PermissionManager = WpPermissionManager_new,
+  DynamicRules = WpDynamicRules_new,
   SimpleEventHook = WpSimpleEventHook_new,
   AsyncEventHook = WpAsyncEventHook_new,
 }

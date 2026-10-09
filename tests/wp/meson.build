@@ -25,6 +25,13 @@ test(
 )
 
 test(
+  'test-client-context',
+  executable('test-client-context', 'client-context.c',
+      dependencies: common_deps),
+  env: common_env,
+)
+
+test(
   'test-metadata',
   executable('test-metadata', 'metadata.c',
       dependencies: common_deps),
@@ -125,6 +132,13 @@ test(
 test(
   'test-json-utils',
   executable('test-json-utils', 'json-utils.c',
+      dependencies: common_deps),
+  env: common_env,
+)
+
+test(
+  'test-dynamic-rules',
+  executable('test-dynamic-rules', 'dynamic-rules.c',
       dependencies: common_deps),
   env: common_env,
 )

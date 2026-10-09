@@ -216,6 +216,11 @@ test_si_standard_link_main (TestFixture * f, gconstpointer user_data)
   /* deactivate */
   wp_object_deactivate (WP_OBJECT (link), WP_SESSION_ITEM_FEATURE_ACTIVE);
 
+  /* the links are destroyed on the server; wait for the registry to catch up */
+  wp_core_sync (f->base.core, NULL, (GAsyncReadyCallback) test_core_done_cb,
+      &f->base);
+  g_main_loop_run (f->base.loop);
+
   /* verify the graph state */
   {
     g_autoptr (WpNode) out_node = NULL;

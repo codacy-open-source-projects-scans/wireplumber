@@ -157,7 +157,8 @@ static gint
 get_default_event_priority (const gchar *event_type)
 {
   if (g_str_has_prefix(event_type, "select-") ||
-        g_str_has_prefix(event_type, "create-"))
+      g_str_has_prefix(event_type, "create-") ||
+      g_str_has_prefix(event_type, "remove-"))
     return 500;
   if (g_str_has_prefix(event_type, "autoswitch-"))
     return 400;
@@ -169,10 +170,10 @@ get_default_event_priority (const gchar *event_type)
     return -510;
   else if (!g_strcmp0 (event_type, "node-state-changed"))
     return 50;
-  else if (!g_strcmp0 (event_type, "metadata-changed"))
-    return 50;
   else if (g_str_has_suffix (event_type, "-params-changed"))
     return 50;
+  else if (!g_strcmp0 (event_type, "metadata-changed"))
+    return 300;
   else if (g_str_has_prefix (event_type, "client-"))
     return 200;
   else if (g_str_has_prefix (event_type, "device-"))
@@ -211,8 +212,9 @@ static gboolean
 is_it_local_event (const gchar *event_type)
 {
   if (g_str_has_prefix(event_type, "select-") ||
-    g_str_has_prefix(event_type, "create-") ||
-    g_str_has_prefix(event_type, "autoswitch-"))
+      g_str_has_prefix(event_type, "create-") ||
+      g_str_has_prefix(event_type, "remove-") ||
+      g_str_has_prefix(event_type, "autoswitch-"))
     return TRUE;
 
   return FALSE;

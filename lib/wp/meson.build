@@ -1,6 +1,7 @@
 wp_lib_sources = files(
   'base-dirs.c',
   'client.c',
+  'dynamic-rules.c',
   'component-loader.c',
   'conf.c',
   'core.c',
@@ -41,6 +42,7 @@ wp_lib_sources = files(
 )
 
 wp_lib_priv_sources = files(
+  'private/client-context.c',
   'private/pipewire-object-mixin.c',
   'private/internal-comp-loader.c',
   'private/registry.c',
@@ -49,6 +51,7 @@ wp_lib_priv_sources = files(
 wp_lib_headers = files(
   'base-dirs.h',
   'client.h',
+  'dynamic-rules.h',
   'component-loader.h',
   'conf.h',
   'core.h',

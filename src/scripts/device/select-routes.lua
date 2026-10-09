@@ -18,7 +18,7 @@ log = Log.open_topic ("s-device")
 
 SimpleEventHook {
   name = "device/select-route",
-  after = "device/select-profile",
+  after = "device/select-profile-on-device-added",
   interests = {
     EventInterest {
       Constraint { "event.type", "=", "device-added" },

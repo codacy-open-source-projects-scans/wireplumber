@@ -70,3 +70,15 @@ test(
   args: ['lua-api-tests', 'properties.lua'],
   env: common_env,
 )
+test(
+  'test-lua-node-utils',
+  script_tester,
+  args: ['lua-api-tests', 'node-utils.lua'],
+  env: common_env,
+)
+test(
+  'test-lua-profile-utils',
+  script_tester,
+  args: ['lua-api-tests', 'profile-utils.lua'],
+  env: common_env,
+)

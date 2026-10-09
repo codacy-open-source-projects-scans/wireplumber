@@ -35,6 +35,7 @@ function getplugged (link)
 end
 
 function lutils.getAction (pmrl, link)
+  if not pmrl then return "mix" end
   local props = pmrl.properties
 
   if getprio (pmrl) == getprio (link) then
@@ -73,8 +74,8 @@ function lutils.clearPriorityMediaRoleLink (link)
       goto continue
     end
 
-    if getprio (link) > prio or
-        (getprio (link) == prio and getplugged (link) > plugged) then
+    if getprio (l) > prio or
+        (getprio (l) == prio and getplugged (l) > plugged) then
       prio = getprio (l)
       plugged = getplugged (l)
       prio_link = l
@@ -267,6 +268,18 @@ function lutils.canLink (properties, si_target)
     return false
   end
 
+  -- the stream of a role loopback must not link to another role-based target
+  local link_group = properties ["node.link-group"]
+  if link_group and
+      cutils.parseBool (target_props ["policy.role-based.target"]) and
+      cutils.get_object_manager ("session-item"):lookup {
+        type = "SiLinkable",
+        Constraint { "node.link-group", "=", link_group },
+        Constraint { "policy.role-based.target", "=", true },
+      } then
+    return false
+  end
+
   -- check link group
   local function canLinkGroupCheck(link_group, si_target, hops)
     local target_props = si_target.properties
@@ -317,7 +330,6 @@ function lutils.canLink (properties, si_target)
     return true
   end
 
-  local link_group = properties ["node.link-group"]
   if link_group then
     return canLinkGroupCheck (link_group, si_target, 0)
   end

@@ -17,10 +17,15 @@ Hooks
      - Triggered by
      - Action
 
-   * - device/select-profile
+   * - device/select-profile-on-device-added
      - select-profile.lua
-     - device added or EnumProfiles changed
+     - device added
      - schedules a 'select-profile' event
+
+   * - device/select-profile-on-device-enumprofile-changed
+     - select-profile.lua
+     - EnumProfiles changed
+     - schedules a 'select-profile' event unless Bluetooth autoswitch is enabled for a Bluetooth device
 
    * - device/select-route
      - select-routes.lua

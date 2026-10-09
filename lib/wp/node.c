@@ -11,6 +11,7 @@
 #include "object-manager.h"
 #include "log.h"
 #include "wpenums.h"
+#include "private/client-context.h"
 #include "private/pipewire-object-mixin.h"
 
 #include <pipewire/impl.h>
@@ -393,6 +394,7 @@ wp_node_new_from_factory (WpCore * core,
       "core", core,
       "factory-name", factory_name,
       "global-properties", props,
+      "own-global", FALSE,
       NULL);
 }
 
@@ -643,9 +645,26 @@ enum {
 struct _WpImplNode
 {
   WpProxy parent;
-  GWeakRef core;
   struct pw_impl_node *pw_impl_node;
 };
+
+/* the pw_impl_node lives in the client context when there is one, so it is
+   owned by another thread; see private/client-context.h */
+static inline void
+wp_impl_node_lock (WpImplNode * self)
+{
+  WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+  if (ctx)
+    wp_client_context_lock (ctx);
+}
+
+static inline void
+wp_impl_node_unlock (WpImplNode * self)
+{
+  WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+  if (ctx)
+    wp_client_context_unlock (ctx);
+}
 
 static void wp_impl_node_pw_object_mixin_priv_interface_init (
     WpPwObjectMixinPrivInterface * iface);
@@ -699,7 +718,9 @@ wp_impl_node_finalize (GObject * object)
 {
   WpImplNode *self = WP_IMPL_NODE (object);
 
+  wp_impl_node_lock (self);
   g_clear_pointer (&self->pw_impl_node, pw_impl_node_destroy);
+  wp_impl_node_unlock (self);
 
   G_OBJECT_CLASS (wp_impl_node_parent_class)->finalize (object);
 }
@@ -762,12 +783,20 @@ wp_impl_node_activate_execute_step (WpObject * object,
   switch (step) {
   case STEP_EXPORT: {
     g_autoptr (WpCore) core = wp_object_get_core (object);
-    struct pw_core *pw_core = wp_core_get_pw_core (core);
+    WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+    /* the node must be exported on the connection of the context it lives in;
+       pw_core_export() binds the exported node's context and data loop to it */
+    struct pw_core *pw_core = ctx ?
+        wp_client_context_get_pw_core (ctx) : wp_core_get_pw_core (core);
     g_return_if_fail (pw_core);
 
+    /* export and start listening in one locked section, so that the loop
+       thread cannot deliver the "bound" event before we are listening */
+    wp_impl_node_lock (self);
     wp_proxy_set_pw_proxy (WP_PROXY (self),
         pw_core_export (pw_core, PW_TYPE_INTERFACE_Node, NULL,
             self->pw_impl_node, 0));
+    wp_impl_node_unlock (self);
     break;
   }
   default:
@@ -782,6 +811,16 @@ wp_impl_node_activate_execute_step (WpObject * object,
  * locally, loading the implementation from factory or wrapping a manually
  * constructed `pw_impl_node`. This object can then be exported to PipeWire
  * by requesting WP_PROXY_FEATURE_BOUND.
+ *
+ * \remarks When the "client-context" component is loaded, which is the case in
+ * the default daemon configuration, wp_impl_node_new_from_pw_factory() creates
+ * the node in a secondary `pw_context` that runs on its own thread, so that the
+ * node is not affected by anything that blocks WirePlumber's main loop, and
+ * exports it on that context's connection. The WpImplNode itself stays on the
+ * thread that created it: its features, signals and the rest of its API are
+ * unchanged. Nodes wrapped with wp_impl_node_new_wrap() belong to whichever
+ * context the given `pw_impl_node` was created in, which is the core's own
+ * `pw_context` in most cases, and are exported on the core's connection.
  *
  * \gproperties
  *
@@ -830,9 +869,13 @@ wp_impl_node_enum_params_sync (gpointer instance, guint32 id,
   GPtrArray *result =
       g_ptr_array_new_with_free_func ((GDestroyNotify) wp_spa_pod_unref);
 
+  /* the params are collected in this call stack, so this stays synchronous
+     even though the node runs on the client context's thread */
+  wp_impl_node_lock (self);
   pw_impl_node_for_each_param (self->pw_impl_node, 1, id, start, num,
       filter ? wp_spa_pod_get_spa_pod (filter) : NULL,
       impl_node_collect_params, result);
+  wp_impl_node_unlock (self);
   return result;
 }
 
@@ -840,10 +883,15 @@ static gint
 wp_impl_node_set_param (gpointer instance, guint32 id, guint32 flags,
     WpSpaPod * param)
 {
+  WpImplNode *self = WP_IMPL_NODE (instance);
   WpPwObjectMixinData *d = wp_pw_object_mixin_get_data (instance);
   g_autoptr (WpSpaPod) p = param;
-  return spa_node_set_param (d->iface, id, flags,
-      wp_spa_pod_get_spa_pod (p));
+  gint res;
+
+  wp_impl_node_lock (self);
+  res = spa_node_set_param (d->iface, id, flags, wp_spa_pod_get_spa_pod (p));
+  wp_impl_node_unlock (self);
+  return res;
 }
 
 static void
@@ -894,16 +942,24 @@ wp_impl_node_new_from_pw_factory (WpCore * core,
     const gchar * factory_name, WpProperties * properties)
 {
   g_autoptr (WpProperties) props = properties;
-  struct pw_context *pw_context = wp_core_get_pw_context (core);
+  /* the node is created in the client context, so that it runs on its own
+     thread; pw_core_export() later ties it to that context's connection */
+  g_autoptr (WpClientContext) ctx = wp_client_context_find (core);
+  struct pw_context *pw_context = ctx ?
+      wp_client_context_get_pw_context (ctx) : wp_core_get_pw_context (core);
   struct pw_impl_factory *factory = NULL;
   struct pw_impl_node *node = NULL;
+  WpImplNode *self = NULL;
 
   g_return_val_if_fail (pw_context != NULL, NULL);
+
+  if (ctx)
+    wp_client_context_lock (ctx);
 
   factory = pw_context_find_factory (pw_context, factory_name);
   if (!factory) {
     wp_warning ("pipewire factory '%s' not found", factory_name);
-    return NULL;
+    goto out;
   }
 
   node = pw_impl_factory_create_object (factory,
@@ -911,8 +967,18 @@ wp_impl_node_new_from_pw_factory (WpCore * core,
       props ? wp_properties_to_pw_properties (props) : NULL, 0);
   if (!node) {
     wp_warning ("failed to create node from factory '%s'", factory_name);
-    return NULL;
+    goto out;
   }
 
-  return wp_impl_node_new_wrap (core, node);
+  /* construct while still holding the lock: wp_impl_node_constructed() reads
+     from the node, which the loop thread may otherwise be running already */
+  self = wp_impl_node_new_wrap (core, node);
+  if (self)
+    wp_proxy_set_client_context (WP_PROXY (self), ctx);
+
+out:
+  if (ctx)
+    wp_client_context_unlock (ctx);
+
+  return self;
 }

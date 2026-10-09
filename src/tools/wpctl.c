@@ -112,6 +112,15 @@ static struct {
       guint64 id;
       const char *level;
     } set_log_level;
+
+    struct {
+      gboolean wp_config;
+      gboolean pw_config;
+      gboolean all;
+      gboolean no_restart;
+      gboolean dry_run;
+      gboolean yes;
+    } reset;
   };
 } cmdline;
 
@@ -1135,6 +1144,7 @@ do_set_volume (WpCtl * self, WpPipewireObject *proxy)
   GVariant *variant = NULL;
   gboolean res = FALSE;
   gdouble curr_volume = 1.0;
+  gdouble new_volume = cmdline.set_volume.volume;
   guint32 id = wp_proxy_get_bound_id (WP_PROXY (proxy));
 
   if (cmdline.set_volume.type == 's') {
@@ -1147,19 +1157,19 @@ do_set_volume (WpCtl * self, WpPipewireObject *proxy)
     g_variant_lookup (variant, "volume", "d", &curr_volume);
     g_clear_pointer (&variant, g_variant_unref);
 
-    cmdline.set_volume.volume = (cmdline.set_volume.volume + curr_volume);
+    new_volume += curr_volume;
   }
-  if (cmdline.set_volume.volume < 0) {
-    cmdline.set_volume.volume = 0.0;
+  if (new_volume < 0) {
+    new_volume = 0.0;
   }
   if (cmdline.set_volume.limit > 0) {
-    if (cmdline.set_volume.volume > cmdline.set_volume.limit) {
-      cmdline.set_volume.volume = cmdline.set_volume.limit;
+    if (new_volume > cmdline.set_volume.limit) {
+      new_volume = cmdline.set_volume.limit;
     }
   }
 
   g_variant_builder_add (&b, "{sv}", "volume",
-      g_variant_new_double (cmdline.set_volume.volume));
+      g_variant_new_double (new_volume));
   variant = g_variant_builder_end (&b);
 
   g_signal_emit_by_name (mixer_api, "set-volume", id, variant, &res);
@@ -1848,7 +1858,173 @@ out:
   g_main_loop_quit (self->loop);
 }
 
-#define N_ENTRIES 4
+/* reset */
+
+/* Collect all paths under `file` in post-order (children before their parent directory) */
+static gboolean
+collect_paths_recursive (GFile *file, GPtrArray *paths, GError **error)
+{
+  GFileType type = g_file_query_file_type (file,
+      G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL);
+
+  if (type == G_FILE_TYPE_DIRECTORY) {
+    g_autoptr (GFileEnumerator) enumerator = g_file_enumerate_children (file,
+        G_FILE_ATTRIBUTE_STANDARD_NAME,
+        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, error);
+    if (!enumerator)
+      return FALSE;
+
+    while (TRUE) {
+      GFileInfo *info = g_file_enumerator_next_file (enumerator, NULL, error);
+      if (!info) {
+        if (*error)
+          return FALSE;
+        break;
+      }
+      const gchar *name = g_file_info_get_name (info);
+      g_autoptr (GFile) child = g_file_get_child (file, name);
+      g_object_unref (info);
+      if (!collect_paths_recursive (child, paths, error))
+        return FALSE;
+    }
+    if (!g_file_enumerator_close (enumerator, NULL, error))
+      return FALSE;
+  }
+
+  /* Add this entry after its children */
+  g_ptr_array_add (paths, g_file_get_path (file));
+  return TRUE;
+}
+
+static gboolean
+systemctl_user (const gchar *action, const gchar *service)
+{
+  const gchar *argv[] = { "systemctl", "--user", action, service, NULL };
+  gint exit_status;
+  g_autoptr (GError) error = NULL;
+
+  if (!g_spawn_sync (NULL, (gchar **) argv, NULL,
+          G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+          NULL, NULL, NULL, NULL, &exit_status, &error)) {
+    fprintf (stderr, "Warning: could not run systemctl: %s\n", error->message);
+    return FALSE;
+  }
+  if (!g_spawn_check_exit_status (exit_status, &error)) {
+    fprintf (stderr, "Warning: systemctl --user %s %s failed: %s\n",
+        action, service, error->message);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gchar *
+reset_get_state_dir (const gchar *subdir)
+{
+  const gchar *base = g_getenv ("XDG_STATE_HOME");
+  if (base)
+    return g_build_filename (base, subdir, NULL);
+  return g_build_filename (g_get_home_dir (), ".local", "state", subdir, NULL);
+}
+
+static gboolean
+reset_parse_positional (gint argc, gchar ** argv, GError **error)
+{
+  return TRUE;
+}
+
+static gboolean
+reset_prepare (WpCtl * self, GError ** error)
+{
+  return TRUE;
+}
+
+static void
+reset_run (WpCtl * self)
+{
+  gboolean remove_wp_config = cmdline.reset.wp_config || cmdline.reset.all;
+  gboolean remove_pw_config = cmdline.reset.pw_config || cmdline.reset.all;
+  gboolean dry_run = cmdline.reset.dry_run;
+  gboolean yes = cmdline.reset.yes;
+  gboolean do_restart = !cmdline.reset.no_restart && !dry_run;
+
+  g_autofree gchar *wp_state_dir = reset_get_state_dir ("wireplumber");
+  g_autofree gchar *wp_config_dir = remove_wp_config ?
+      g_build_filename (g_get_user_config_dir (), "wireplumber", NULL) : NULL;
+  g_autofree gchar *pw_config_dir = remove_pw_config ?
+      g_build_filename (g_get_user_config_dir (), "pipewire", NULL) : NULL;
+
+  /* Collect all paths to be removed */
+  g_autoptr (GPtrArray) paths =
+      g_ptr_array_new_with_free_func (g_free);
+
+  const gchar *dirs[] = { wp_state_dir, wp_config_dir, pw_config_dir };
+  for (guint i = 0; i < G_N_ELEMENTS (dirs); i++) {
+    if (!dirs[i])
+      continue;
+    g_autoptr (GFile) file = g_file_new_for_path (dirs[i]);
+    if (!g_file_query_exists (file, NULL))
+      continue;
+    g_autoptr (GError) error = NULL;
+    if (!collect_paths_recursive (file, paths, &error)) {
+      fprintf (stderr, "Error listing '%s': %s\n", dirs[i], error->message);
+      self->exit_code = 3;
+      return;
+    }
+  }
+
+  if (paths->len == 0) {
+    printf ("Nothing to remove.\n");
+    return;
+  }
+
+  /* Print what will be removed */
+  if (dry_run)
+    printf ("Dry run - no files will be deleted and no services will be restarted\n\n");
+  printf ("The following files will be removed:\n");
+  for (guint i = 0; i < paths->len; i++)
+    printf ("  %s\n", (gchar *) g_ptr_array_index (paths, i));
+
+  if (dry_run)
+    return;
+
+  if (!yes) {
+    /* Ask for confirmation */
+    printf ("\nWARNING: this action is not reversible.\n");
+    printf ("Proceed? [y/N] ");
+    fflush (stdout);
+
+    char buf[8] = {0};
+    if (!fgets (buf, sizeof (buf), stdin) || (buf[0] != 'y' && buf[0] != 'Y')) {
+      printf ("Aborted.\n");
+      return;
+    }
+  }
+
+  /* Stop wireplumber before removing its files */
+  if (do_restart)
+    systemctl_user ("stop", "wireplumber");
+
+  /* Delete all collected paths in order (children before their parent) */
+  for (guint i = 0; i < paths->len; i++) {
+    const gchar *path = g_ptr_array_index (paths, i);
+    g_autoptr (GFile) file = g_file_new_for_path (path);
+    g_autoptr (GError) error = NULL;
+    if (!g_file_delete (file, NULL, &error)) {
+      fprintf (stderr, "Failed to remove '%s': %s\n", path, error->message);
+      self->exit_code = 3;
+    }
+  }
+
+  /* Restart pipewire if its config was removed */
+  if (do_restart && remove_pw_config)
+    systemctl_user ("restart", "pipewire");
+
+  /* Start wireplumber again */
+  if (do_restart)
+    systemctl_user ("start", "wireplumber");
+}
+
+#define N_ENTRIES 7
 
 static const struct subcommand {
   /* the name to match on the command line */
@@ -1859,6 +2035,8 @@ static const struct subcommand {
   const gchar *summary;
   /* long description, shown at the bottom of the help message */
   const gchar *description;
+  /* if TRUE, run the subcommand without connecting to PipeWire */
+  gboolean no_connect;
   /* additional cmdline arguments for this subcommand */
   const GOptionEntry entries[N_ENTRIES];
   /* function to parse positional arguments */
@@ -2031,6 +2209,37 @@ static const struct subcommand {
     .parse_positional = set_log_level_parse_positional,
     .prepare = set_log_level_prepare,
     .run = set_log_level_run,
+  },
+  {
+    .name = "reset",
+    .positional_args = "",
+    .summary = "Resets WirePlumber (and optionally PipeWire) to defaults by removing state and config files",
+    .description = NULL,
+    .no_connect = TRUE,
+    .entries = {
+      { "wireplumber-config", 'c', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+        &cmdline.reset.wp_config,
+        "Also remove WirePlumber config files (~/.config/wireplumber)", NULL },
+      { "pipewire-config", 'p', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+        &cmdline.reset.pw_config,
+        "Also remove PipeWire config files (~/.config/pipewire) and restart pipewire", NULL },
+      { "all", 'a', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+        &cmdline.reset.all,
+        "Remove all state and config files", NULL },
+      { "no-restart", 'n', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+        &cmdline.reset.no_restart,
+        "Do not restart services after removing files", NULL },
+      { "dry-run", 'd', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+        &cmdline.reset.dry_run,
+        "Show what would be deleted without actually deleting anything", NULL },
+      { "yes", 'y', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,
+        &cmdline.reset.yes,
+        "Proceed without prompting for confirmation", NULL },
+      { NULL }
+    },
+    .parse_positional = reset_parse_positional,
+    .prepare = reset_prepare,
+    .run = reset_run,
   }
 };
 
@@ -2149,6 +2358,12 @@ main (gint argc, gchar **argv)
   if (!cmd->prepare (&ctl, &error)) {
     fprintf (stderr, "%s\n", error->message);
     return 1;
+  }
+
+  /* if the subcommand does not need PipeWire, run it directly */
+  if (cmd->no_connect) {
+    cmd->run (&ctl);
+    return ctl.exit_code;
   }
 
   /* load and register settings */

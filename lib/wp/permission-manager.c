@@ -29,7 +29,32 @@ WP_DEFINE_LOCAL_LOG_TOPIC ("wp-permission-manager")
  * a particular client.
  *
  * WpPermissionManager API.
+ *
+ * \gsignals
+ *
+ * \par client-properties-changed
+ * \parblock
+ * \code
+ * void
+ * client_properties_changed_callback (WpPermissionManager * self,
+ *                                     WpClient *client,
+ *                                     gpointer user_data)
+ * \endcode
+ * Emitted when the properties of an attached client change
+ *
+ * Parameters:
+ * - `client` - the client whose properties have changed
+ *
+ * Flags: G_SIGNAL_RUN_LAST
+ * \endparblock
  */
+
+enum {
+  SIGNAL_CLIENT_PROPERTIES_CHANGED,
+  N_SIGNALS,
+};
+
+static guint32 signals[N_SIGNALS] = {0};
 
 typedef struct _PermissionMatch PermissionMatch;
 struct _PermissionMatch
@@ -76,10 +101,12 @@ struct _WpPermissionManager
   WpObject parent;
 
   guint32 default_perms;
+  guint32 core_perms;
   GPtrArray *clients;
   GHashTable *matches;
 
   WpObjectManager *om;
+  gboolean pending_update;
 };
 
 G_DEFINE_TYPE (WpPermissionManager, wp_permission_manager, WP_TYPE_OBJECT)
@@ -89,6 +116,9 @@ wp_permission_manager_init (WpPermissionManager * self)
 {
   /* Init default permissions to all */
   self->default_perms = PW_PERM_R | PW_PERM_W | PW_PERM_X;
+
+  /* Core permissions not set by default (inherit from default_perms) */
+  self->core_perms = PW_PERM_INVALID;
 
   /* Init permission interests table */
   self->matches = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL,
@@ -271,6 +301,13 @@ build_permissions_array (WpPermissionManager *self, WpClient *client)
   /* Add default permissions */
   g_array_append_val (arr, def_perm);
 
+  /* Add core permissions if explicitly set (core is not in the OM since it is
+   * implicit in the PipeWire connection and not sent through the registry) */
+  if (self->core_perms != PW_PERM_INVALID) {
+    struct pw_permission core_perm = { PW_ID_CORE, self->core_perms };
+    g_array_append_val (arr, core_perm);
+  }
+
   /* Add object specific permissions in the array */
   it = wp_object_manager_new_iterator (self->om);
   for (; wp_iterator_next (it, &value); g_value_unset (&value)) {
@@ -373,7 +410,18 @@ on_object_added_or_removed (WpObjectManager *om, WpGlobalProxy *object,
   WpPermissionManager * self = WP_PERMISSION_MANAGER (d);
 
   if (has_object_match (self, object))
+    self->pending_update = TRUE;
+}
+
+static void
+on_objects_changed (WpObjectManager *om, gpointer d)
+{
+  WpPermissionManager * self = WP_PERMISSION_MANAGER (d);
+
+  if (self->pending_update) {
+    self->pending_update = FALSE;
     update_permissions (self);
+  }
 }
 
 static void
@@ -405,6 +453,8 @@ wp_permission_manager_activate_execute_step (WpObject * object,
           G_CALLBACK (on_object_added_or_removed), self, 0);
       g_signal_connect_object (self->om, "object-removed",
           G_CALLBACK (on_object_added_or_removed), self, 0);
+      g_signal_connect_object (self->om, "objects-changed",
+          G_CALLBACK (on_objects_changed), self, 0);
       g_signal_connect_object (self->om, "installed",
           G_CALLBACK (on_object_manager_installed), transition, 0);
       wp_core_install_object_manager (core, self->om);
@@ -423,6 +473,7 @@ wp_permission_manager_deactivate (WpObject * object, WpObjectFeatures features)
 {
   WpPermissionManager *self = WP_PERMISSION_MANAGER (object);
 
+  self->pending_update = FALSE;
   g_clear_object (&self->om);
 
   wp_object_update_features (WP_OBJECT (self), 0, WP_OBJECT_FEATURES_ALL);
@@ -456,6 +507,18 @@ wp_permission_manager_class_init (WpPermissionManagerClass * klass)
   wpobject_class->activate_execute_step =
       wp_permission_manager_activate_execute_step;
   wpobject_class->deactivate = wp_permission_manager_deactivate;
+
+  signals[SIGNAL_CLIENT_PROPERTIES_CHANGED] = g_signal_new (
+      "client-properties-changed", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
+      WP_TYPE_CLIENT);
+}
+
+static void
+on_client_properties_changed (WpClient * client, GParamSpec * param,
+    WpPermissionManager * self)
+{
+  g_signal_emit (self, signals[SIGNAL_CLIENT_PROPERTIES_CHANGED], 0, client);
 }
 
 void
@@ -465,6 +528,11 @@ wp_permission_manager_add_client (WpPermissionManager *self, WpClient *client)
 
   g_ptr_array_add (self->clients, g_object_ref (client));
   update_client_permissions (self, client);
+
+  g_signal_connect_object (client, "notify::properties",
+      G_CALLBACK (on_client_properties_changed), self, 0);
+
+  g_signal_emit (self, signals[SIGNAL_CLIENT_PROPERTIES_CHANGED], 0, client);
 }
 
 void
@@ -475,6 +543,8 @@ wp_permission_manager_remove_client (WpPermissionManager *self,
 
   g_ptr_array_remove_fast (self->clients, client);
   update_client_permissions (self, client);
+
+  g_signal_handlers_disconnect_by_data (client, self);
 }
 
 /*!
@@ -508,6 +578,48 @@ wp_permission_manager_set_default_permissions (WpPermissionManager *self,
 
   if (self->default_perms != permissions) {
     self->default_perms = permissions;
+    update_permissions (self);
+  }
+}
+
+/*!
+ * \brief Gets the default permissions that are applied to all objects that
+ * don't match any interest
+ *
+ * \ingroup wppermissionmanager
+ * \param self the permission manager
+ * \returns the default permissions
+ */
+guint32
+wp_permission_manager_get_default_permissions (WpPermissionManager *self)
+{
+  g_return_val_if_fail (WP_IS_PERMISSION_MANAGER (self), 0);
+
+  return self->default_perms;
+}
+
+/*!
+ * \brief Sets the permissions that will be applied to the core object (ID 0).
+ *
+ * The core object is not visible to the permission manager's object manager
+ * because it is implicit in the PipeWire connection and not sent through the
+ * registry. This method allows setting explicit permissions on it, independent
+ * of the default permissions.
+ *
+ * If not set (or set to PW_PERM_INVALID), the core inherits default_permissions.
+ *
+ * \ingroup wppermissionmanager
+ * \param self the permission manager
+ * \param permissions the permissions to apply to the core object
+ */
+void
+wp_permission_manager_set_core_permissions (WpPermissionManager *self,
+    guint32 permissions)
+{
+  g_return_if_fail (WP_IS_PERMISSION_MANAGER (self));
+
+  if (self->core_perms != permissions) {
+    self->core_perms = permissions;
     update_permissions (self);
   }
 }

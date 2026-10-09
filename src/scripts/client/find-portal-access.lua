@@ -48,6 +48,14 @@ function getCameraPermissions ()
   return cached_camera_permissions
 end
 
+-- Advertise portal client gate support to the PW daemon.
+-- This is set once on our own client at script load time
+-- so PW's core_hello can detect that a capable session manager is
+-- connected, regardless of which portal client is being processed.
+Core.update_properties {
+  ["pipewire.access.portal.gate-supported"] = "true"
+}
+
 -- The portal permission manager
 portal_pm = PermissionManager ()
 portal_pm:set_default_permissions (Perm.ALL)
@@ -118,6 +126,29 @@ portal_pm:add_interest_match (
   }
 )
 
+-- Handle portal client gating/ungating.
+-- The PW daemon gates portal clients on fd handoff
+-- (when an app connects via the stolen fd) by removing
+-- PW_PERM_R from PW_ID_CORE and setting the property
+-- pipewire.access.portal.gated to true. This makes
+-- the client busy so the daemon stops reading from the
+-- socket until permissions are set up properly.
+--
+-- two timing scenarios handled:
+-- 1) gate is already set so ungate immediately.
+-- 2) gate is set later (app connects after PermissionManager attached)
+--    watch for the property change and ungate then.
+portal_pm:connect ("client-properties-changed", function (pm, c)
+  local app_name = c:get_property ("application.name")
+  local gated = c:get_property ("pipewire.access.portal.gated")
+  if gated == "true" then
+    c:update_permissions { [0] = "all" }
+    log:info (c, string.format (
+        "Ungated portal client '%s' (via property change)",
+        app_name))
+  end
+end)
+
 -- Listen for changes and update permissions when that happens
 if pps_plugin ~= nil then
   pps_plugin:connect("changed", function (p, table, id, deleted, permissions)
@@ -159,3 +190,12 @@ SimpleEventHook {
     end
   end
 }:register()
+
+-- Activate the permission manager now rather than when the first client
+-- connects, so that its permissions are already computed by then
+portal_pm:activate (Features.ALL, function (_, e)
+  if e then
+    log:warning ("failed to activate the portal permission manager: " ..
+        tostring (e))
+  end
+end)

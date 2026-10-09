@@ -7,6 +7,7 @@ Table of Contents
    :maxdepth: 2
    :caption: The WirePlumber Daemon
 
+   daemon/getting_started.rst
    daemon/installing.rst
    daemon/running.rst
    daemon/configuration.rst
@@ -26,6 +27,7 @@ Table of Contents
    :maxdepth: 2
    :caption: WirePlumber's Policies
 
+   policies/client_access.rst
    policies/linking.rst
    policies/smart_filters.rst
    policies/software_dsp.rst
@@ -46,9 +48,11 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 2
-   :caption: Tools
+   :caption: Man Pages
 
-   tools/wpctl.rst
+   man/wireplumber.rst
+   man/wpctl.rst
+   man/wpexec.rst
 
 .. toctree::
    :maxdepth: 2

@@ -260,6 +260,25 @@ wp_pw_object_mixin_enum_params_finish (WpPipewireObject * obj,
   return wp_iterator_new_ptr_array (array, WP_TYPE_SPA_POD);
 }
 
+static GPtrArray *
+filter_cached_params (GPtrArray *params, WpSpaPod *filter)
+{
+  g_autoptr (GPtrArray) filtered = NULL;
+
+  if (!filter)
+    return g_ptr_array_ref (params);
+
+  filtered = g_ptr_array_new_with_free_func ((GDestroyNotify) wp_spa_pod_unref);
+  for (guint i = 0; i < params->len; i++) {
+    WpSpaPod *param = g_ptr_array_index (params, i);
+    g_autoptr (WpSpaPod) result = wp_spa_pod_filter (param, filter);
+
+    if (result)
+      g_ptr_array_add (filtered, g_steal_pointer (&result));
+  }
+  return g_steal_pointer (&filtered);
+}
+
 static WpIterator *
 wp_pw_object_mixin_enum_params_sync (WpPipewireObject * obj, const gchar * id,
     WpSpaPod * filter)
@@ -282,9 +301,11 @@ wp_pw_object_mixin_enum_params_sync (WpPipewireObject * obj, const gchar * id,
   } else {
     /* otherwise, find and return the cached params */
     WpPwObjectMixinData *data = wp_pw_object_mixin_get_data (obj);
-    params = wp_pw_object_mixin_get_stored_params (data,
+    g_autoptr (GPtrArray) stored = wp_pw_object_mixin_get_stored_params (data,
         wp_spa_id_value_number (param_id));
-    /* TODO filter */
+
+    if (stored)
+      params = filter_cached_params (stored, filter);
   }
 
   return params ? wp_iterator_new_ptr_array (params, WP_TYPE_SPA_POD) : NULL;
@@ -892,6 +913,19 @@ wp_pw_object_mixin_impl_enum_params (gpointer instance, int seq,
   return 0;
 }
 
+static gboolean
+subscribed_ids_contains (GArray *subscribed_ids, guint32 id)
+{
+  if (!subscribed_ids)
+    return FALSE;
+
+  for (guint i = 0; i < subscribed_ids->len; i++) {
+    if (g_array_index (subscribed_ids, guint32, i) == id)
+      return TRUE;
+  }
+  return FALSE;
+}
+
 int
 wp_pw_object_mixin_impl_subscribe_params (gpointer instance,
     guint32 *ids, guint32 n_ids)
@@ -903,14 +937,18 @@ wp_pw_object_mixin_impl_subscribe_params (gpointer instance,
   if (!iface->enum_params_sync)
     return -ENOTSUP;
 
-  for (guint i = 0; i < n_ids; i++)
-    wp_pw_object_mixin_impl_enum_params (instance, 1, ids[i], 0, -1, NULL);
+  for (guint i = 0; i < n_ids; i++) {
+    guint32 id = ids[i];
 
-  if (!d->subscribed_ids)
-    d->subscribed_ids = g_array_new (FALSE, FALSE, sizeof (guint32));
+    if (subscribed_ids_contains (d->subscribed_ids, id))
+      continue;
 
-  /* FIXME: deduplicate stored ids */
-  g_array_append_vals (d->subscribed_ids, ids, n_ids);
+    wp_pw_object_mixin_impl_enum_params (instance, 1, id, 0, -1, NULL);
+
+    if (!d->subscribed_ids)
+      d->subscribed_ids = g_array_new (FALSE, FALSE, sizeof (guint32));
+    g_array_append_val (d->subscribed_ids, id);
+  }
   return 0;
 }
 
@@ -976,14 +1014,8 @@ wp_pw_object_mixin_notify_params_changed (gpointer instance, guint32 id)
   struct spa_param_info * info = find_param_info (instance, id);
   g_return_if_fail (info);
 
-  if (d->subscribed_ids) {
-    for (guint i = 0; i < d->subscribed_ids->len; i++) {
-      if (g_array_index (d->subscribed_ids, guint32, i) == id) {
-        subscribed = TRUE;
-        break;
-      }
-    }
-  }
+  if (subscribed_ids_contains (d->subscribed_ids, id))
+    subscribed = TRUE;
 
   name = wp_spa_id_value_short_name (wp_spa_id_value_from_number (
         "Spa:Enum:ParamId", id));

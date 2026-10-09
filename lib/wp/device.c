@@ -11,6 +11,7 @@
 #include "core.h"
 #include "log.h"
 #include "error.h"
+#include "private/client-context.h"
 #include "private/pipewire-object-mixin.h"
 
 #include <pipewire/impl.h>
@@ -186,6 +187,7 @@ wp_device_new_from_factory (WpCore * core,
       "core", core,
       "factory-name", factory_name,
       "global-properties", props,
+      "own-global", FALSE,
       NULL);
 }
 
@@ -198,24 +200,74 @@ struct _WpSpaDevice
   struct spa_device *device;
   struct spa_hook listener;
   WpProperties *properties;
+  struct spa_param_info *info_params;
+  guint info_n_params;
+  GPtrArray *last_enum_params;
   GPtrArray *managed_objs;
   GPtrArray *pending_obj_config;
 };
+
+/* the spa_device lives in the client context when there is one, so it runs on
+   another thread; see private/client-context.h */
+static inline void
+wp_spa_device_lock (WpSpaDevice * self)
+{
+  WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+  if (ctx)
+    wp_client_context_lock (ctx);
+}
+
+static inline void
+wp_spa_device_unlock (WpSpaDevice * self)
+{
+  WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+  if (ctx)
+    wp_client_context_unlock (ctx);
+}
+
+/*
+ * TRUE if the spa_device event we are currently handling arrived on the
+ * client context's loop thread, so it has to be handed over to the main
+ * thread.
+ * FALSE when we are the main thread having called into the device with the
+ * loop lock held, in which case running the handler directly is both correct
+ * and required by the callers that expect synchronous behaviour.
+ */
+static inline gboolean
+wp_spa_device_needs_marshalling (WpSpaDevice * self)
+{
+  WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+  return ctx && wp_client_context_in_thread (ctx);
+}
+
+/* takes ownership of @data, which must start with a WpSpaDevice* field */
+static void
+wp_spa_device_invoke_main (WpSpaDevice * self, GSourceFunc func, gpointer data,
+    GDestroyNotify destroy)
+{
+  WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+  *((WpSpaDevice **) data) = g_object_ref (self);
+  wp_client_context_invoke_main (ctx, func, data, destroy);
+}
 
 enum {
   PROP_0,
   PROP_SPA_DEVICE_HANDLE,
   PROP_PROPERTIES,
+  N_PROPS,
 };
 
 enum
 {
   SIGNAL_CREATE_OBJECT,
   SIGNAL_OBJECT_REMOVED,
+  SIGNAL_EVENT,
+  SIGNAL_PARAMS_CHANGED,
   SPA_DEVICE_LAST_SIGNAL,
 };
 
 static guint spa_device_signals[SPA_DEVICE_LAST_SIGNAL] = { 0 };
+static GParamSpec *properties[N_PROPS] = { NULL, };
 
 G_DEFINE_TYPE (WpSpaDevice, wp_spa_device, WP_TYPE_PROXY)
 
@@ -237,6 +289,8 @@ static void
 wp_spa_device_init (WpSpaDevice * self)
 {
   self->properties = wp_properties_new_empty ();
+  self->last_enum_params = g_ptr_array_new_with_free_func (
+      (GDestroyNotify)wp_spa_pod_unref);
   self->managed_objs = g_ptr_array_new_with_free_func (object_unref_safe);
   self->pending_obj_config = g_ptr_array_new_with_free_func (pod_unref_safe);
 }
@@ -268,8 +322,12 @@ wp_spa_device_finalize (GObject * object)
   WpSpaDevice *self = WP_SPA_DEVICE (object);
 
   self->device = NULL;
+  wp_spa_device_lock (self);
   g_clear_pointer (&self->handle, pw_unload_spa_handle);
+  wp_spa_device_unlock (self);
+
   g_clear_pointer (&self->properties, wp_properties_unref);
+  g_clear_pointer (&self->last_enum_params, g_ptr_array_unref);
   g_clear_pointer (&self->managed_objs, g_ptr_array_unref);
   g_clear_pointer (&self->pending_obj_config, g_ptr_array_unref);
 
@@ -317,19 +375,108 @@ wp_spa_device_get_property (GObject * object, guint property_id, GValue * value,
   }
 }
 
+/* always runs on the main thread */
+static void
+on_device_info (WpSpaDevice * self, guint64 change_mask,
+    WpProperties * props, const struct spa_param_info * params, guint n_params)
+{
+  /*
+   * This gives us additional properties about the device, like the
+   * "api.alsa.card.*" ones that are not set by the monitor. The spa device
+   * emits it before object_info, and the queue preserves that order, so it is
+   * still applied before the create-object handlers run.
+   */
+  if (change_mask & SPA_DEVICE_CHANGE_MASK_PROPS)
+    wp_properties_update (self->properties, props);
+
+  /* Emit params-changed when the params have changed */
+  if (change_mask & SPA_DEVICE_CHANGE_MASK_PARAMS) {
+    for (guint32 i = 0; i < n_params; i++) {
+      if (!self->info_params || i >= self->info_n_params ||
+          params[i].flags != self->info_params[i].flags) {
+        const gchar *name;
+        name = wp_spa_id_value_short_name (wp_spa_id_value_from_number (
+            "Spa:Enum:ParamId", params[i].id));
+        g_signal_emit_by_name (self, "params-changed", name);
+      }
+    }
+  }
+
+  /* Update cached params */
+  self->info_params = g_realloc (self->info_params,
+      n_params * sizeof(struct spa_param_info));
+  if (self->info_params)
+    memcpy (self->info_params, params, n_params * sizeof(struct spa_param_info));
+  self->info_n_params = n_params;
+}
+
+typedef struct {
+  WpSpaDevice *self;
+  guint64 change_mask;
+  WpProperties *props;
+  struct spa_param_info *params;
+  guint n_params;
+} DeviceInfoEvent;
+
+static void
+device_info_event_free (gpointer data)
+{
+  DeviceInfoEvent *e = data;
+  g_clear_object (&e->self);
+  g_clear_pointer (&e->props, wp_properties_unref);
+  g_free (e->params);
+  g_free (e);
+}
+
+static gboolean
+dispatch_device_info (gpointer data)
+{
+  DeviceInfoEvent *e = data;
+  on_device_info (e->self, e->change_mask, e->props, e->params, e->n_params);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 spa_device_event_info (void *data, const struct spa_device_info *info)
 {
   WpSpaDevice *self = WP_SPA_DEVICE (data);
 
-  /*
-   * This is emitted synchronously at the time we add the listener and
-   * before object_info is emitted. It gives us additional properties
-   * about the device, like the "api.alsa.card.*" ones that are not
-   * set by the monitor
-   */
-  if (info->change_mask & SPA_DEVICE_CHANGE_MASK_PROPS)
-    wp_properties_update_from_dict (self->properties, info->props);
+  if (wp_spa_device_needs_marshalling (self)) {
+    /* the spa_device_info is only valid for the duration of this call */
+    DeviceInfoEvent *e = g_new0 (DeviceInfoEvent, 1);
+    e->change_mask = info->change_mask;
+    if (info->change_mask & SPA_DEVICE_CHANGE_MASK_PROPS)
+      e->props = wp_properties_new_copy_dict (info->props);
+    e->n_params = info->n_params;
+    e->params = g_memdup2 (info->params,
+        info->n_params * sizeof (struct spa_param_info));
+    wp_spa_device_invoke_main (self, dispatch_device_info, e,
+        device_info_event_free);
+  } else {
+    g_autoptr (WpProperties) props =
+        (info->change_mask & SPA_DEVICE_CHANGE_MASK_PROPS) ?
+            wp_properties_new_wrap_dict (info->props) : NULL;
+    on_device_info (self, info->change_mask, props, info->params,
+        info->n_params);
+  }
+}
+
+static void
+spa_device_event_result (void *data, int seq, int res, uint32_t type,
+    const void *result)
+{
+  WpSpaDevice *self = WP_SPA_DEVICE (data);
+  const struct spa_result_device_params *r = result;
+
+  if (type == SPA_RESULT_TYPE_DEVICE_PARAMS && seq == 1) {
+    g_autoptr (WpSpaPod) pod_param = NULL;
+    g_autoptr (WpSpaPod) pod_param_copy = NULL;
+
+    pod_param = wp_spa_pod_new_wrap (r->param);
+    pod_param_copy = wp_spa_pod_copy (pod_param);
+
+    g_ptr_array_add (self->last_enum_params, g_steal_pointer (&pod_param_copy));
+  }
 }
 
 static WpSpaPod *
@@ -393,18 +540,14 @@ merge_props (WpSpaPod *old_props, WpSpaPod *new_props)
   return wp_spa_pod_builder_end (b);
 }
 
+/* always runs on the main thread */
 static void
-spa_device_event_event (void *data, const struct spa_event *event)
+on_device_event (WpSpaDevice * self, WpSpaPod * pod)
 {
-  WpSpaDevice *self = WP_SPA_DEVICE (data);
-  g_autoptr (WpSpaPod) pod =
-      wp_spa_pod_new_wrap_const ((const struct spa_pod *) event);
   guint32 id = -1;
   const gchar *type = NULL;
   g_autoptr (WpSpaPod) props = NULL;
   g_autoptr (GObject) child = NULL;
-
-  wp_trace_boxed (WP_TYPE_SPA_POD, pod, "device event");
 
   if (wp_spa_pod_get_object (pod, &type,
           "Object", "i", &id,
@@ -425,23 +568,60 @@ spa_device_event_event (void *data, const struct spa_event *event)
       }
     }
   }
+
+  g_signal_emit (self, spa_device_signals[SIGNAL_EVENT], 0, pod);
+}
+
+typedef struct {
+  WpSpaDevice *self;
+  WpSpaPod *pod;
+} DeviceEvent;
+
+static void
+device_event_free (gpointer data)
+{
+  DeviceEvent *e = data;
+  g_clear_object (&e->self);
+  g_clear_pointer (&e->pod, wp_spa_pod_unref);
+  g_free (e);
+}
+
+static gboolean
+dispatch_device_event (gpointer data)
+{
+  DeviceEvent *e = data;
+  on_device_event (e->self, e->pod);
+  return G_SOURCE_REMOVE;
 }
 
 static void
-spa_device_event_object_info (void *data, uint32_t id,
-    const struct spa_device_object_info *info)
+spa_device_event_event (void *data, const struct spa_event *event)
 {
   WpSpaDevice *self = WP_SPA_DEVICE (data);
+  g_autoptr (WpSpaPod) pod =
+      wp_spa_pod_new_wrap_const ((const struct spa_pod *) event);
 
-  if (info) {
-    const gchar *type;
-    g_autoptr (WpProperties) props = NULL;
+  wp_trace_boxed (WP_TYPE_SPA_POD, pod, "device event");
 
-    type = spa_debug_type_short_name (info->type);
-    props = wp_properties_new_copy_dict (info->props);
+  if (wp_spa_device_needs_marshalling (self)) {
+    /* the event pod is only valid for the duration of this call */
+    DeviceEvent *e = g_new0 (DeviceEvent, 1);
+    e->pod = wp_spa_pod_copy (pod);
+    wp_spa_device_invoke_main (self, dispatch_device_event, e,
+        device_event_free);
+  } else {
+    on_device_event (self, pod);
+  }
+}
 
+/* always runs on the main thread */
+static void
+on_device_object_info (WpSpaDevice * self, guint32 id, const gchar * type,
+    const gchar * factory_name, WpProperties * props)
+{
+  if (type) {
     wp_debug_object (self, "object info: id:%u type:%s factory:%s",
-        id, type, info->factory_name);
+        id, type, factory_name);
 
     if (id < self->managed_objs->len &&
         g_ptr_array_index (self->managed_objs, id) != NULL) {
@@ -451,7 +631,7 @@ spa_device_event_object_info (void *data, uint32_t id,
     }
 
     g_signal_emit (self, spa_device_signals[SIGNAL_CREATE_OBJECT], 0,
-        id, type, info->factory_name, props);
+        id, type, factory_name, props);
   }
   else {
     wp_debug_object (self, "object removed: id:%u", id);
@@ -460,9 +640,65 @@ spa_device_event_object_info (void *data, uint32_t id,
   }
 }
 
+typedef struct {
+  WpSpaDevice *self;
+  guint32 id;
+  gchar *type;
+  gchar *factory_name;
+  WpProperties *props;
+} DeviceObjectInfoEvent;
+
+static void
+device_object_info_event_free (gpointer data)
+{
+  DeviceObjectInfoEvent *e = data;
+  g_clear_object (&e->self);
+  g_free (e->type);
+  g_free (e->factory_name);
+  g_clear_pointer (&e->props, wp_properties_unref);
+  g_free (e);
+}
+
+static gboolean
+dispatch_device_object_info (gpointer data)
+{
+  DeviceObjectInfoEvent *e = data;
+  on_device_object_info (e->self, e->id, e->type, e->factory_name, e->props);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+spa_device_event_object_info (void *data, uint32_t id,
+    const struct spa_device_object_info *info)
+{
+  WpSpaDevice *self = WP_SPA_DEVICE (data);
+  const gchar *type = info ? spa_debug_type_short_name (info->type) : NULL;
+
+  if (wp_spa_device_needs_marshalling (self)) {
+    /* the spa_device_object_info is only valid for the duration of this call.
+       Note that add/remove pairs for the same id must keep their relative
+       order, which the client context's queue guarantees. */
+    DeviceObjectInfoEvent *e = g_new0 (DeviceObjectInfoEvent, 1);
+    e->id = id;
+    if (info) {
+      e->type = g_strdup (type);
+      e->factory_name = g_strdup (info->factory_name);
+      e->props = wp_properties_new_copy_dict (info->props);
+    }
+    wp_spa_device_invoke_main (self, dispatch_device_object_info, e,
+        device_object_info_event_free);
+  } else {
+    g_autoptr (WpProperties) props =
+        info ? wp_properties_new_copy_dict (info->props) : NULL;
+    on_device_object_info (self, id, type,
+        info ? info->factory_name : NULL, props);
+  }
+}
+
 static const struct spa_device_events spa_device_events = {
   SPA_VERSION_DEVICE_EVENTS,
   .info = spa_device_event_info,
+  .result =  spa_device_event_result,
   .event = spa_device_event_event,
   .object_info = spa_device_event_object_info,
 };
@@ -498,21 +734,45 @@ wp_spa_device_activate_execute_step (WpObject * object,
 {
   WpSpaDevice *self = WP_SPA_DEVICE (object);
 
+  /* constructed() leaves this NULL if the handle has no Device interface;
+     fail the activation instead of crashing further down */
+  if (!self->device) {
+    wp_transition_return_error (WP_TRANSITION (transition),
+        g_error_new (WP_DOMAIN_LIBRARY, WP_LIBRARY_ERROR_OPERATION_FAILED,
+            "SPA handle does not implement a device interface"));
+    return;
+  }
+
   switch (step) {
   case STEP_EXPORT: {
     g_autoptr (WpCore) core = wp_object_get_core (object);
-    struct pw_core *pw_core = wp_core_get_pw_core (core);
+    WpClientContext *ctx = wp_proxy_get_client_context (WP_PROXY (self));
+    /* the device must be exported on the connection of the context it lives
+       in, the same way as WpImplNode */
+    struct pw_core *pw_core = ctx ?
+        wp_client_context_get_pw_core (ctx) : wp_core_get_pw_core (core);
     g_return_if_fail (pw_core);
 
+    /* export and start listening in one locked section, so that the loop
+       thread cannot deliver the "bound" event before we are listening */
+    wp_spa_device_lock (self);
     wp_proxy_set_pw_proxy (WP_PROXY (self),
         pw_core_export (pw_core, SPA_TYPE_INTERFACE_Device,
             wp_properties_peek_dict (self->properties),
             self->device, 0));
+    wp_spa_device_unlock (self);
     break;
   }
   case STEP_ADD_DEVICE_LISTENER: {
-    gint res = spa_device_add_listener (self->device, &self->listener,
+    gint res;
+
+    /* the device emits "info" and the initial burst of "object_info" from
+       within this call, on this thread; those are handled directly */
+    wp_spa_device_lock (self);
+    res = spa_device_add_listener (self->device, &self->listener,
         &spa_device_events, self);
+    wp_spa_device_unlock (self);
+
     if (res < 0)
       wp_transition_return_error (WP_TRANSITION (transition),
           g_error_new (WP_DOMAIN_LIBRARY, WP_LIBRARY_ERROR_OPERATION_FAILED,
@@ -535,7 +795,14 @@ wp_spa_device_deactivate (WpObject * object, WpObjectFeatures features)
 
   if (features & WP_SPA_DEVICE_FEATURE_ENABLED) {
     WpSpaDevice *self = WP_SPA_DEVICE (object);
+
+    wp_spa_device_lock (self);
     spa_hook_remove (&self->listener);
+    wp_spa_device_unlock (self);
+
+    g_clear_pointer (&self->info_params, g_free);
+    self->info_n_params = 0;
+    g_ptr_array_set_size (self->last_enum_params, 0);
     g_ptr_array_set_size (self->managed_objs, 0);
     g_ptr_array_set_size (self->pending_obj_config, 0);
     wp_object_update_features (object, 0, WP_SPA_DEVICE_FEATURE_ENABLED);
@@ -558,6 +825,16 @@ wp_spa_device_deactivate (WpObject * object, WpObjectFeatures features)
  * WP_PROXY_FEATURE_BOUND from wp_object_activate(). When exporting, the
  * export should be done before enabling the device, by requesting both
  * features at the same time.
+ *
+ * \remarks When the "client-context" component is loaded, which is the case in
+ * the default daemon configuration, the SPA handle is loaded in a secondary
+ * `pw_context` that runs on its own thread, so that the device is not affected
+ * by anything that blocks WirePlumber's main loop. The WpSpaDevice itself stays
+ * on the thread that created it: all the signals below are emitted there, in
+ * the order in which the `spa_device` emitted them, and
+ * wp_spa_device_enum_params_sync() and wp_spa_device_set_param() remain
+ * synchronous. Note, though, that the signals are then emitted asynchronously,
+ * so a handler may run after the call that caused the event has returned.
  *
  * \gproperties
  *
@@ -635,15 +912,15 @@ wp_spa_device_class_init (WpSpaDeviceClass * klass)
   wpobject_class->activate_execute_step = wp_spa_device_activate_execute_step;
   wpobject_class->deactivate = wp_spa_device_deactivate;
 
-  g_object_class_install_property (object_class, PROP_SPA_DEVICE_HANDLE,
-      g_param_spec_pointer ("spa-device-handle", "spa-device-handle",
-          "The spa device handle",
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_SPA_DEVICE_HANDLE] = g_param_spec_pointer ("spa-device-handle", "spa-device-handle",
+      "The spa device handle",
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
-  g_object_class_install_property (object_class, PROP_PROPERTIES,
-      g_param_spec_boxed ("properties", "properties",
-          "Properties of the device", WP_TYPE_PROPERTIES,
-          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  properties[PROP_PROPERTIES] = g_param_spec_boxed ("properties", "properties",
+      "Properties of the device", WP_TYPE_PROPERTIES,
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
+
+  g_object_class_install_properties (object_class, N_PROPS, properties);
 
   spa_device_signals[SIGNAL_CREATE_OBJECT] = g_signal_new (
       "create-object", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST,
@@ -653,6 +930,14 @@ wp_spa_device_class_init (WpSpaDeviceClass * klass)
   spa_device_signals[SIGNAL_OBJECT_REMOVED] = g_signal_new (
       "object-removed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST,
       0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_UINT);
+
+  spa_device_signals[SIGNAL_EVENT] = g_signal_new (
+      "event", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST,
+      0, NULL, NULL, NULL, G_TYPE_NONE, 1, WP_TYPE_SPA_POD);
+
+  spa_device_signals[SIGNAL_PARAMS_CHANGED] = g_signal_new (
+      "params-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST,
+      0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 /*!
@@ -698,10 +983,18 @@ wp_spa_device_new_from_spa_factory (WpCore * core,
     const gchar * factory_name, WpProperties * properties)
 {
   g_autoptr (WpProperties) props = properties;
-  struct pw_context *pw_context = wp_core_get_pw_context (core);
+  /* the handle is loaded into the client context, so that the device runs on
+     its own thread; pw_core_export() later ties it to that connection */
+  g_autoptr (WpClientContext) ctx = wp_client_context_find (core);
+  struct pw_context *pw_context = ctx ?
+      wp_client_context_get_pw_context (ctx) : wp_core_get_pw_context (core);
   struct spa_handle *handle = NULL;
+  WpSpaDevice *self = NULL;
 
   g_return_val_if_fail (pw_context != NULL, NULL);
+
+  if (ctx)
+    wp_client_context_lock (ctx);
 
   /* Load the monitor handle */
   handle = pw_context_load_spa_handle (pw_context, factory_name,
@@ -709,10 +1002,20 @@ wp_spa_device_new_from_spa_factory (WpCore * core,
   if (!handle) {
     wp_notice ("SPA handle '%s' could not be loaded; is it installed?",
         factory_name);
-    return NULL;
+    goto out;
   }
 
-  return wp_spa_device_new_wrap (core, handle, g_steal_pointer (&props));
+  /* construct while still holding the lock: wp_spa_device_constructed() calls
+     into the handle, which the loop thread may otherwise be running already */
+  self = wp_spa_device_new_wrap (core, handle, g_steal_pointer (&props));
+  if (self)
+    wp_proxy_set_client_context (WP_PROXY (self), ctx);
+
+out:
+  if (ctx)
+    wp_client_context_unlock (ctx);
+
+  return self;
 }
 
 /*!
@@ -727,6 +1030,94 @@ wp_spa_device_get_properties (WpSpaDevice * self)
 {
   g_return_val_if_fail (WP_IS_SPA_DEVICE (self), NULL);
   return wp_properties_ref (self->properties);
+}
+
+/*!
+ * \brief This method can be used to retrieve object parameters of the spa
+ * device synchronously because the spa device always runs locally.
+ *
+ * \ingroup wpspadevice
+ * \param self the spa device
+ * \param id the parameter id to enumerate
+ * \param filter (nullable): a param filter or NULL
+ * \returns (transfer full) (nullable): an iterator to iterate over cached
+ *    parameters, or NULL if parameters for this \a id are not cached;
+ *    the items in the iterator are WpSpaPod
+ * \since 0.5.15
+ */
+WpIterator *
+wp_spa_device_enum_params_sync (WpSpaDevice * self,
+    const gchar * id, WpSpaPod * filter)
+{
+  g_autoptr (GPtrArray) params = NULL;
+  WpSpaIdValue param_id;
+  guint32 id_val;
+  const struct spa_pod *f;
+
+  g_return_val_if_fail (WP_IS_SPA_DEVICE (self), NULL);
+  g_return_val_if_fail (id, NULL);
+
+  /* Translate the id */
+  param_id = wp_spa_id_value_from_short_name ("Spa:Enum:ParamId", id);
+  if (!param_id)
+    return NULL;
+  id_val = wp_spa_id_value_number (param_id);
+
+  /* Clear the last enum params */
+  g_ptr_array_set_size (self->last_enum_params, 0);
+
+  f = filter ? wp_spa_pod_get_spa_pod (filter) : NULL;
+
+  /* the results are collected by spa_device_event_result() in this call
+     stack, which is what keeps this synchronous even when the device runs on
+     the client context's thread */
+  wp_spa_device_lock (self);
+  spa_device_enum_params (self->device, 1, id_val, 0, -1, f);
+  wp_spa_device_unlock (self);
+
+  params = g_ptr_array_copy (self->last_enum_params, (GCopyFunc)wp_spa_pod_ref,
+      NULL);
+  g_ptr_array_set_size (self->last_enum_params, 0);
+  return wp_iterator_new_ptr_array (g_steal_pointer (&params), WP_TYPE_SPA_POD);
+}
+
+/*!
+ * \brief Sets a parameter on the spa device.
+ *
+ * \ingroup wpspadevice
+ * \param self the pipewire object
+ * \param id the parameter id to set
+ * \param flags optional flags or 0
+ * \param param (transfer full): the parameter to set
+ * \returns TRUE on success, FALSE if setting the param failed
+ * \since 0.5.15
+ */
+gboolean
+wp_spa_device_set_param (WpSpaDevice * self,
+    const gchar * id, guint32 flags, WpSpaPod * param)
+{
+  WpSpaIdValue param_id;
+  guint32 id_val;
+  const struct spa_pod *p;
+  gint res;
+
+  g_return_val_if_fail (WP_IS_SPA_DEVICE (self), FALSE);
+  g_return_val_if_fail (id, FALSE);
+  g_return_val_if_fail (param, FALSE);
+
+  /* Translate the id */
+  param_id = wp_spa_id_value_from_short_name ("Spa:Enum:ParamId", id);
+  if (!param_id)
+    return FALSE;
+  id_val = wp_spa_id_value_number (param_id);
+
+  p = wp_spa_pod_get_spa_pod (param);
+
+  wp_spa_device_lock (self);
+  res = spa_device_set_param (self->device, id_val, flags, p);
+  wp_spa_device_unlock (self);
+
+  return res >= 0;
 }
 
 /*!
